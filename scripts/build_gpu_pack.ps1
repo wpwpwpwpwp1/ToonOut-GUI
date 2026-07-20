@@ -1,3 +1,8 @@
+param(
+    [switch]$KeepSourceArchive,
+    [switch]$KeepBuildTree
+)
+
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -38,7 +43,23 @@ python (Join-Path $ProjectRoot "scripts\package_gpu_runtime.py") `
     --source $WorkerOutput `
     --output $PackOutput
 
-python (Join-Path $ProjectRoot "scripts\split_gpu_pack.py") `
-    --input $PackOutput
+$SplitArguments = @(
+    (Join-Path $ProjectRoot "scripts\split_gpu_pack.py"),
+    "--input",
+    $PackOutput
+)
+if ($KeepSourceArchive) {
+    $SplitArguments += "--keep-input"
+}
+python @SplitArguments
 
-Write-Output "GPU pack and GitHub Release parts created under dist."
+if (-not $KeepBuildTree -and (Test-Path -LiteralPath $BuildRoot)) {
+    $ResolvedBuild = (Resolve-Path -LiteralPath $BuildRoot).Path
+    $ExpectedParent = (Resolve-Path -LiteralPath (Join-Path $ProjectRoot "build")).Path
+    if (-not $ResolvedBuild.StartsWith($ExpectedParent, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove a build directory outside the project build folder."
+    }
+    Remove-Item -LiteralPath $ResolvedBuild -Recurse -Force
+}
+
+Write-Output "GPU pack Release parts created under dist."

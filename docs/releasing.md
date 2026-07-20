@@ -76,10 +76,12 @@ Actions 탭에서 `Build ToonOut release`가 통과했는지 확인한 뒤 Relea
 
 NVIDIA GPU 팩은 약 3.27GB여서 GitHub Release의 단일 파일 제한을 넘는다. CUDA
 12.8 빌드 환경에서 `scripts\build_gpu_pack.ps1`을 실행하면 `.parts.json`과
-`.partNN` 조각도 함께 만들어진다. `.parts.json`과 모든 조각을 Release에 추가하고,
-셋 중 하나라도 빠지지 않았는지 확인한다. GPU 팩 빌드는 큰 원본 ZIP과 분할본을
-동시에 만들므로 기본 GitHub-hosted Windows runner에서 만들지 않고, 22GB 이상 여유가
-있는 검증된 Windows 빌드 머신에서 만든다. GPU worker EXE도 팩을 만들기 전에
+`.partNN` 조각이 만들어진다. `.parts.json`과 모든 조각을 Release에 추가하고,
+셋 중 하나라도 빠지지 않았는지 확인한다. 빌드 중에는 GPU worker, 원본 ZIP, 분할본이
+잠시 함께 존재하지만, 성공 후에는 원본 ZIP과 worker 중간 빌드 폴더를 자동 삭제한다.
+기본 GitHub-hosted Windows runner 대신 22GB 이상 여유가 있는 검증된 Windows 빌드
+머신에서 만든다. 디버깅을 위해 중간 결과가 필요할 때만 `-KeepSourceArchive` 또는
+`-KeepBuildTree`를 사용한다. GPU worker EXE도 팩을 만들기 전에
 `scripts\sign_windows_binary.ps1`로 서명한다.
 
 CPU Release가 만들어진 뒤 같은 태그에 GPU 파일을 추가한다.

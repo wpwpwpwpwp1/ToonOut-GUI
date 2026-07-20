@@ -13,6 +13,7 @@ from gpu_runtime import (
     delete_gpu_runtime,
     find_adjacent_gpu_pack,
     gpu_runtime_is_installed,
+    gpu_runtime_size,
     install_gpu_runtime,
     load_gpu_runtime_manifest,
 )
@@ -86,7 +87,7 @@ class GpuRuntimeTests(unittest.TestCase):
             delete_gpu_runtime(destination)
             self.assertFalse(destination.exists())
 
-    def test_split_pack_is_verified_reassembled_and_installed(self):
+    def test_split_pack_is_verified_and_installed_without_reassembly(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pack = root / "ToonOut-NVIDIA-GPU-Pack.zip"
@@ -99,6 +100,31 @@ class GpuRuntimeTests(unittest.TestCase):
 
             self.assertEqual(manifest.worker_protocol, GPU_WORKER_PROTOCOL)
             self.assertTrue(gpu_runtime_is_installed(destination))
+            logical_size = sum(
+                path.stat().st_size
+                for path in destination.rglob("*")
+                if path.is_file()
+            )
+            self.assertGreater(gpu_runtime_size(destination), 0)
+            self.assertLessEqual(gpu_runtime_size(destination), logical_size)
+
+    def test_split_pack_can_remove_redundant_source_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "ToonOut-NVIDIA-GPU-Pack.zip"
+            checksum = Path(f"{pack}.sha256")
+            write_fake_pack(pack)
+            checksum.write_text("generated checksum", encoding="ascii")
+
+            parts_manifest = split_pack(
+                pack,
+                part_size=40,
+                remove_input=True,
+            )
+
+            self.assertTrue(parts_manifest.is_file())
+            self.assertFalse(pack.exists())
+            self.assertFalse(checksum.exists())
 
     def test_missing_split_pack_part_is_actionable(self):
         with tempfile.TemporaryDirectory() as directory:

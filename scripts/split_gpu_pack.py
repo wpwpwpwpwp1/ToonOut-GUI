@@ -23,7 +23,12 @@ def file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def split_pack(input_path: Path, part_size: int = DEFAULT_PART_SIZE) -> Path:
+def split_pack(
+    input_path: Path,
+    part_size: int = DEFAULT_PART_SIZE,
+    *,
+    remove_input: bool = False,
+) -> Path:
     input_path = input_path.resolve()
     if part_size <= 0 or part_size >= 2 * 1024**3:
         raise ValueError("part size must be greater than zero and below 2 GiB")
@@ -72,6 +77,9 @@ def split_pack(input_path: Path, part_size: int = DEFAULT_PART_SIZE) -> Path:
         ),
         encoding="utf-8",
     )
+    if remove_input:
+        input_path.unlink()
+        Path(f"{input_path}.sha256").unlink(missing_ok=True)
     return manifest_path
 
 
@@ -79,8 +87,19 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True)
     parser.add_argument("--part-size", type=int, default=DEFAULT_PART_SIZE)
+    parser.add_argument(
+        "--keep-input",
+        action="store_true",
+        help="분할 검증 후에도 원본 ZIP을 보관합니다.",
+    )
     args = parser.parse_args()
-    print(split_pack(Path(args.input), args.part_size))
+    print(
+        split_pack(
+            Path(args.input),
+            args.part_size,
+            remove_input=not args.keep_input,
+        )
+    )
     return 0
 
 
