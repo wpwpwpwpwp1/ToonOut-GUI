@@ -47,14 +47,18 @@ jobs:
           }
           python -c "from update_config import UPDATE_PUBLIC_KEY_B64; assert UPDATE_PUBLIC_KEY_B64, 'update_config.py has no public key'"
 
-      - name: Require Windows publisher signing configuration
+      - name: Detect Windows publisher signing configuration
         shell: pwsh
         env:
           WINDOWS_CODESIGN_CERT_B64: ${{ secrets.WINDOWS_CODESIGN_CERT_B64 }}
           WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
         run: |
-          if (-not $env:WINDOWS_CODESIGN_CERT_B64 -or -not $env:WINDOWS_CODESIGN_PASSWORD) {
-            throw "Missing Windows Authenticode signing secrets. Public releases must be signed."
+          if ($env:WINDOWS_CODESIGN_CERT_B64 -and $env:WINDOWS_CODESIGN_PASSWORD) {
+            "TOONOUT_SIGNED_RELEASE=true" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Output "Authenticode configuration found; publishing a signed release."
+          } else {
+            "TOONOUT_SIGNED_RELEASE=false" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Warning "Authenticode configuration is missing; publishing an unsigned prerelease."
           }
 
       - name: Install Python dependencies
@@ -70,6 +74,7 @@ jobs:
         run: .\scripts\build_app.ps1 -Version $env:TOONOUT_VERSION
 
       - name: Sign application executable
+        if: env.TOONOUT_SIGNED_RELEASE == 'true'
         shell: pwsh
         env:
           WINDOWS_CODESIGN_CERT_B64: ${{ secrets.WINDOWS_CODESIGN_CERT_B64 }}
@@ -89,6 +94,7 @@ jobs:
         run: .\scripts\build_installer.ps1 -Version $env:TOONOUT_VERSION
 
       - name: Sign installer
+        if: env.TOONOUT_SIGNED_RELEASE == 'true'
         shell: pwsh
         env:
           WINDOWS_CODESIGN_CERT_B64: ${{ secrets.WINDOWS_CODESIGN_CERT_B64 }}
@@ -112,7 +118,8 @@ jobs:
             --repository "$env:GITHUB_REPOSITORY" `
             --tag "$env:GITHUB_REF_NAME"
 
-      - name: Publish GitHub Release
+      - name: Publish signed GitHub Release
+        if: env.TOONOUT_SIGNED_RELEASE == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -123,3 +130,17 @@ jobs:
             --verify-tag `
             --title "ToonOut $env:TOONOUT_VERSION" `
             --generate-notes
+
+      - name: Publish unsigned beta GitHub Release
+        if: env.TOONOUT_SIGNED_RELEASE != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" `
+            ".\dist\ToonOut-Setup-$env:TOONOUT_VERSION.exe" `
+            ".\dist\update.json" `
+            --verify-tag `
+            --title "ToonOut $env:TOONOUT_VERSION (unsigned beta)" `
+            --generate-notes `
+            --prerelease
