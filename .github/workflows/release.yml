@@ -1,0 +1,125 @@
+name: Build ToonOut release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Resolve and validate version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $declared = python -c "from app_version import APP_VERSION; print(APP_VERSION)"
+          if ($version -ne $declared) {
+            throw "Tag version $version does not match APP_VERSION $declared."
+          }
+          "TOONOUT_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Require update signing configuration
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY_B64: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY_B64 }}
+        run: |
+          if (-not $env:UPDATE_SIGNING_PRIVATE_KEY_B64) {
+            throw "Missing UPDATE_SIGNING_PRIVATE_KEY_B64 repository secret."
+          }
+          python -c "from update_config import UPDATE_PUBLIC_KEY_B64; assert UPDATE_PUBLIC_KEY_B64, 'update_config.py has no public key'"
+
+      - name: Require Windows publisher signing configuration
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_CERT_B64: ${{ secrets.WINDOWS_CODESIGN_CERT_B64 }}
+          WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CODESIGN_CERT_B64 -or -not $env:WINDOWS_CODESIGN_PASSWORD) {
+            throw "Missing Windows Authenticode signing secrets. Public releases must be signed."
+          }
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests
+
+      - name: Build PyInstaller app
+        shell: pwsh
+        run: .\scripts\build_app.ps1 -Version $env:TOONOUT_VERSION
+
+      - name: Sign application executable
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_CERT_B64: ${{ secrets.WINDOWS_CODESIGN_CERT_B64 }}
+          WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+        run: |
+          .\scripts\sign_windows_binary.ps1 `
+            -Path ".\build\app\dist\ToonOut\ToonOut.exe" `
+            -CertificateBase64 $env:WINDOWS_CODESIGN_CERT_B64 `
+            -CertificatePassword $env:WINDOWS_CODESIGN_PASSWORD
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build per-user installer
+        shell: pwsh
+        run: .\scripts\build_installer.ps1 -Version $env:TOONOUT_VERSION
+
+      - name: Sign installer
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_CERT_B64: ${{ secrets.WINDOWS_CODESIGN_CERT_B64 }}
+          WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+        run: |
+          .\scripts\sign_windows_binary.ps1 `
+            -Path ".\dist\ToonOut-Setup-$env:TOONOUT_VERSION.exe" `
+            -CertificateBase64 $env:WINDOWS_CODESIGN_CERT_B64 `
+            -CertificatePassword $env:WINDOWS_CODESIGN_PASSWORD
+
+      - name: Create signed update manifest
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_PRIVATE_KEY_B64: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY_B64 }}
+        run: |
+          python .\scripts\create_update_manifest.py `
+            --installer ".\dist\ToonOut-Setup-$env:TOONOUT_VERSION.exe" `
+            --output ".\dist\update.json" `
+            --version "$env:TOONOUT_VERSION" `
+            --minimum-supported-version "0.1.0" `
+            --repository "$env:GITHUB_REPOSITORY" `
+            --tag "$env:GITHUB_REF_NAME"
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" `
+            ".\dist\ToonOut-Setup-$env:TOONOUT_VERSION.exe" `
+            ".\dist\update.json" `
+            --verify-tag `
+            --title "ToonOut $env:TOONOUT_VERSION" `
+            --generate-notes

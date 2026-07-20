@@ -1,0 +1,8 @@
+# Optional NVIDIA worker pack built separately, then installed by the same app.
+-r requirements-inference.txt
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
+
+PyInstaller==6.21.0

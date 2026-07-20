@@ -1,0 +1,529 @@
+"""UI를 멈추지 않고 ToonOut 배치와 로컬 파일 작업을 처리한다."""
+
+import json
+import locale
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+from PySide6.QtCore import QThread, Signal
+
+from acceleration import detect_acceleration
+from gpu_runtime import (
+    delete_gpu_runtime,
+    gpu_runtime_size,
+    install_gpu_runtime,
+    load_gpu_runtime_manifest,
+)
+from inference import ToonOutEngine
+from model_installation import delete_model_files, move_model_files
+from performance import (
+    PerformanceMode,
+    PerformancePolicy,
+    apply_torch_policy,
+    preset_policy,
+)
+
+
+class InferenceThread(QThread):
+    model_status = Signal(str)
+    model_ready = Signal(str)
+    model_failed = Signal(str)
+    item_started = Signal(str)
+    item_completed = Signal(str, str)
+    item_failed = Signal(str, str)
+    progress_changed = Signal(int, int)
+    pause_reached = Signal()
+    batch_finished = Signal(bool)
+
+    def __init__(
+        self,
+        model_directory: str | None = None,
+        performance_policy: PerformancePolicy | None = None,
+    ):
+        super().__init__()
+        self._engine = ToonOutEngine(model_directory)
+        self._jobs: list[tuple[str, str, str]] = []
+        self._cancel_event = threading.Event()
+        self._resume_event = threading.Event()
+        self._resume_event.set()
+        self._performance_policy = (
+            performance_policy
+            or preset_policy(PerformanceMode.BALANCED)
+        ).normalized()
+
+    @property
+    def job_count(self) -> int:
+        return len(self._jobs)
+
+    @property
+    def model_is_loaded(self) -> bool:
+        return self._engine.is_loaded
+
+    def set_model_directory(self, directory: str) -> bool:
+        if self.isRunning():
+            raise RuntimeError("모델 처리 중에는 저장 위치를 바꿀 수 없습니다.")
+        return self._engine.set_model_directory(directory)
+
+    def reset_engine(self, directory: str) -> None:
+        if self.isRunning():
+            raise RuntimeError("모델 처리 중에는 모델을 초기화할 수 없습니다.")
+        self._engine = ToonOutEngine(directory)
+
+    def set_jobs(self, jobs: list[tuple[str, str, str]]):
+        if self.isRunning():
+            raise RuntimeError("이미 추론 작업이 실행 중입니다.")
+        self._jobs = list(jobs)
+        self._cancel_event.clear()
+        self._resume_event.set()
+
+    def set_performance_policy(self, policy: PerformancePolicy) -> None:
+        if self.isRunning():
+            raise RuntimeError("처리 중에는 성능 모드를 바꿀 수 없습니다.")
+        self._performance_policy = policy.normalized()
+
+    def request_cancel(self):
+        self._cancel_event.set()
+        self._resume_event.set()
+
+    def request_pause(self):
+        self._resume_event.clear()
+
+    def request_resume(self):
+        self._resume_event.set()
+
+    def _wait_before_next_item(self, last_completed_at: float | None) -> bool:
+        pause_announced = False
+        while True:
+            if self._cancel_event.is_set():
+                return False
+            if not self._resume_event.is_set():
+                if not pause_announced:
+                    self.pause_reached.emit()
+                    pause_announced = True
+                self._resume_event.wait(0.1)
+                continue
+
+            if last_completed_at is None:
+                return True
+            elapsed_ms = (time.monotonic() - last_completed_at) * 1000
+            remaining_ms = self._performance_policy.cooldown_ms - elapsed_ms
+            if remaining_ms <= 0:
+                return True
+            self._cancel_event.wait(min(0.1, remaining_ms / 1000))
+
+    @staticmethod
+    def friendly_error(error: Exception) -> str:
+        message = str(error).strip()
+        lowered = message.lower()
+
+        if "out of memory" in lowered:
+            return (
+                "메모리가 부족합니다. 성능 모드의 메모리 상한을 높이거나 "
+                "더 작은 이미지로 다시 시도하세요."
+            )
+        if "connection" in lowered or "network" in lowered:
+            return "모델 파일을 받지 못했습니다. 인터넷 연결을 확인하세요."
+        if "no space" in lowered:
+            return "저장 공간이 부족합니다. 여유 공간을 확보하세요."
+        if (
+            "not found in your environment" in lowered
+            or "실행 구성요소가 누락" in message
+        ):
+            return (
+                "모델 실행 구성요소가 누락되었습니다. 앱을 다시 설치하거나, "
+                "개발 환경에서는 requirements.txt를 다시 설치하세요."
+            )
+        if (
+            isinstance(error, PermissionError)
+            or "permission" in lowered
+            or "access is denied" in lowered
+        ):
+            return (
+                "모델 저장 폴더에 쓸 수 없습니다. "
+                "모델 설치 창에서 다른 폴더를 선택하세요."
+            )
+        if not message:
+            return "알 수 없는 오류가 발생했습니다."
+        return message[:240]
+
+    def run(self):
+        try:
+            import torch
+
+            apply_torch_policy(torch, self._performance_policy)
+            self._engine.load(self.model_status.emit)
+            self.model_ready.emit(self._engine.device_label)
+        except Exception as error:
+            self.model_failed.emit(self.friendly_error(error))
+            return
+
+        total = len(self._jobs)
+        completed_count = 0
+        last_completed_at: float | None = None
+
+        for item_id, source_path, output_path in self._jobs:
+            if not self._wait_before_next_item(last_completed_at):
+                break
+
+            self.item_started.emit(item_id)
+            try:
+                self._engine.remove_background(source_path, output_path)
+                self.item_completed.emit(item_id, output_path)
+            except Exception as error:
+                self.item_failed.emit(item_id, self.friendly_error(error))
+
+            completed_count += 1
+            self.progress_changed.emit(completed_count, total)
+            last_completed_at = time.monotonic()
+
+        self.batch_finished.emit(self._cancel_event.is_set())
+
+
+class ExternalInferenceThread(QThread):
+    """GPU 팩의 worker를 실행하되 기존 추론 스레드와 같은 신호를 낸다."""
+
+    model_status = Signal(str)
+    model_ready = Signal(str)
+    model_failed = Signal(str)
+    item_started = Signal(str)
+    item_completed = Signal(str, str)
+    item_failed = Signal(str, str)
+    progress_changed = Signal(int, int)
+    pause_reached = Signal()
+    batch_finished = Signal(bool)
+
+    def __init__(
+        self,
+        worker_command: list[str],
+        model_directory: str | None = None,
+        performance_policy: PerformancePolicy | None = None,
+    ):
+        super().__init__()
+        self._worker_command = list(worker_command)
+        self._model_directory = model_directory or ""
+        self._jobs: list[tuple[str, str, str]] = []
+        self._cancel_event = threading.Event()
+        self._cancel_path: Path | None = None
+        self._pause_requested = threading.Event()
+        self._pause_path: Path | None = None
+        self._performance_policy = (
+            performance_policy
+            or preset_policy(PerformanceMode.BALANCED)
+        ).normalized()
+
+    @property
+    def job_count(self) -> int:
+        return len(self._jobs)
+
+    @property
+    def model_is_loaded(self) -> bool:
+        # 별도 프로세스는 배치 종료 시 메모리에서 내려간다.
+        return False
+
+    def set_model_directory(self, directory: str) -> bool:
+        if self.isRunning():
+            raise RuntimeError("모델 처리 중에는 저장 위치를 바꿀 수 없습니다.")
+        self._model_directory = directory
+        return True
+
+    def reset_engine(self, directory: str) -> None:
+        self.set_model_directory(directory)
+
+    def set_jobs(self, jobs: list[tuple[str, str, str]]):
+        if self.isRunning():
+            raise RuntimeError("이미 추론 작업이 실행 중입니다.")
+        self._jobs = list(jobs)
+        self._cancel_event.clear()
+        self._pause_requested.clear()
+
+    def set_performance_policy(self, policy: PerformancePolicy) -> None:
+        if self.isRunning():
+            raise RuntimeError("처리 중에는 성능 모드를 바꿀 수 없습니다.")
+        self._performance_policy = policy.normalized()
+
+    def request_cancel(self):
+        self._cancel_event.set()
+        cancel_path = self._cancel_path
+        if cancel_path is not None:
+            try:
+                cancel_path.touch(exist_ok=True)
+            except OSError:
+                pass
+
+    def request_pause(self):
+        self._pause_requested.set()
+        pause_path = self._pause_path
+        if pause_path is not None:
+            try:
+                pause_path.touch(exist_ok=True)
+            except OSError:
+                pass
+
+    def request_resume(self):
+        self._pause_requested.clear()
+        pause_path = self._pause_path
+        if pause_path is not None:
+            try:
+                pause_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _dispatch_record(self, record: dict) -> bool:
+        event = record.get("event")
+        if event == "model_status":
+            self.model_status.emit(str(record.get("message", "")))
+        elif event == "model_ready":
+            self.model_ready.emit(str(record.get("device_label", "NVIDIA GPU")))
+        elif event == "model_failed":
+            self.model_failed.emit(str(record.get("error", "GPU 모델 준비 실패")))
+            return True
+        elif event == "item_started":
+            self.item_started.emit(str(record.get("item_id", "")))
+        elif event == "item_completed":
+            self.item_completed.emit(
+                str(record.get("item_id", "")),
+                str(record.get("output_path", "")),
+            )
+        elif event == "item_failed":
+            self.item_failed.emit(
+                str(record.get("item_id", "")),
+                str(record.get("error", "GPU 처리 실패")),
+            )
+        elif event == "progress_changed":
+            self.progress_changed.emit(
+                int(record.get("completed", 0)),
+                int(record.get("total", 0)),
+            )
+        elif event == "batch_paused":
+            self.pause_reached.emit()
+        elif event == "batch_finished":
+            self.batch_finished.emit(bool(record.get("cancelled", False)))
+            return True
+        return False
+
+    @staticmethod
+    def _decode_worker_line(raw_line: bytes) -> str:
+        """새 UTF-8 worker와 기존 Windows 코드페이지 worker를 모두 읽는다."""
+        encodings = ["utf-8", locale.getpreferredencoding(False)]
+        if sys.platform == "win32":
+            # 한국어 Windows에서 만들어진 기존 GPU 팩과의 호환 경로다.
+            encodings.append("cp949")
+
+        tried: set[str] = set()
+        for encoding in encodings:
+            normalized = encoding.lower()
+            if normalized in tried:
+                continue
+            tried.add(normalized)
+            try:
+                return raw_line.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+        return raw_line.decode("utf-8", errors="replace")
+
+    def run(self):
+        terminal_event_received = False
+        diagnostic_lines: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="toonout-gpu-job-") as directory:
+            working_directory = Path(directory)
+            jobs_path = working_directory / "jobs.json"
+            cancel_path = working_directory / "cancel"
+            pause_path = working_directory / "pause"
+            self._cancel_path = cancel_path
+            self._pause_path = pause_path
+            jobs_path.write_text(
+                json.dumps(self._jobs, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            command = [
+                *self._worker_command,
+                "--model-directory",
+                self._model_directory,
+                "--jobs-file",
+                str(jobs_path),
+                "--cancel-file",
+                str(cancel_path),
+                "--pause-file",
+                str(pause_path),
+                "--cpu-threads",
+                str(self._performance_policy.cpu_threads),
+                "--gpu-memory-fraction",
+                str(self._performance_policy.gpu_memory_fraction),
+                "--cooldown-ms",
+                str(self._performance_policy.cooldown_ms),
+            ]
+            creation_flags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if sys.platform == "win32"
+                else 0
+            )
+            worker_environment = os.environ.copy()
+            # Python worker에는 UTF-8을 우선 요청한다. 이 환경 변수를 무시하는
+            # 기존 frozen worker는 아래의 바이트 디코더가 별도로 처리한다.
+            worker_environment["PYTHONIOENCODING"] = "utf-8"
+            worker_environment["PYTHONUTF8"] = "1"
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creation_flags,
+                    env=worker_environment,
+                )
+                if self._cancel_event.is_set():
+                    cancel_path.touch(exist_ok=True)
+                if self._pause_requested.is_set():
+                    pause_path.touch(exist_ok=True)
+                assert process.stdout is not None
+                try:
+                    for raw_line in process.stdout:
+                        line = self._decode_worker_line(raw_line).strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            diagnostic_lines.append(line)
+                            diagnostic_lines = diagnostic_lines[-8:]
+                            continue
+                        if (
+                            isinstance(record, dict)
+                            and self._dispatch_record(record)
+                        ):
+                            terminal_event_received = True
+                finally:
+                    process.stdout.close()
+                return_code = process.wait()
+            except OSError as error:
+                self.model_failed.emit(
+                    f"GPU worker를 실행하지 못했습니다: {error}"
+                )
+                return
+            finally:
+                self._cancel_path = None
+                self._pause_path = None
+
+        if terminal_event_received:
+            return
+        if self._cancel_event.is_set():
+            self.batch_finished.emit(True)
+            return
+        details = " · ".join(diagnostic_lines[-3:])
+        message = f"GPU worker가 예기치 않게 종료되었습니다 (코드 {return_code})."
+        if details:
+            message = f"{message}\n{details[:500]}"
+        self.model_failed.emit(message)
+
+
+class ModelFileThread(QThread):
+    status_changed = Signal(str)
+    succeeded = Signal(bool)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        action: str,
+        source_directory: str,
+        destination_directory: str | None = None,
+    ):
+        super().__init__()
+        self._action = action
+        self._source_directory = source_directory
+        self._destination_directory = destination_directory
+
+    def run(self):
+        try:
+            if self._action == "delete":
+                delete_model_files(
+                    self._source_directory,
+                    self.status_changed.emit,
+                )
+                self.succeeded.emit(True)
+                return
+            if self._action == "move" and self._destination_directory:
+                source_removed = move_model_files(
+                    self._source_directory,
+                    self._destination_directory,
+                    self.status_changed.emit,
+                )
+                self.succeeded.emit(source_removed)
+                return
+            raise ValueError("지원하지 않는 모델 파일 작업입니다.")
+        except Exception as error:
+            self.failed.emit(InferenceThread.friendly_error(error))
+
+
+class GpuRuntimeFileThread(QThread):
+    status_changed = Signal(str)
+    installed = Signal(object)
+    deleted = Signal()
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        action: str,
+        runtime_directory: str,
+        pack_path: str | None = None,
+    ):
+        super().__init__()
+        self._action = action
+        self._runtime_directory = runtime_directory
+        self._pack_path = pack_path
+
+    def run(self):
+        try:
+            if self._action == "install" and self._pack_path:
+                manifest = install_gpu_runtime(
+                    self._pack_path,
+                    self._runtime_directory,
+                    self.status_changed.emit,
+                )
+                self.installed.emit(manifest)
+                return
+            if self._action == "delete":
+                self.status_changed.emit("GPU 가속 파일을 삭제하는 중")
+                delete_gpu_runtime(self._runtime_directory)
+                self.deleted.emit()
+                return
+            raise ValueError("지원하지 않는 GPU 가속 팩 작업입니다.")
+        except Exception as error:
+            self.failed.emit(InferenceThread.friendly_error(error))
+
+
+class AccelerationDetectionThread(QThread):
+    detected = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        runtime_directory: str,
+        gpu_enabled: bool,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._runtime_directory = runtime_directory
+        self._gpu_enabled = gpu_enabled
+
+    def run(self):
+        try:
+            try:
+                runtime = load_gpu_runtime_manifest(
+                    self._runtime_directory,
+                    verify_files=False,
+                )
+            except Exception:
+                runtime = None
+            info = detect_acceleration(
+                runtime,
+                self._gpu_enabled,
+                runtime_size=gpu_runtime_size(self._runtime_directory),
+                runtime_directory=self._runtime_directory,
+            )
+            self.detected.emit(info)
+        except Exception as error:
+            self.failed.emit(str(error) or "처리 장치를 확인하지 못했습니다.")
