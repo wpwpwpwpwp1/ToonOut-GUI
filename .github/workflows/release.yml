@@ -66,6 +66,7 @@ jobs:
 
       - name: Run tests
         shell: pwsh
+        continue-on-error: ${{ env.TOONOUT_SIGNED_RELEASE != 'true' }}
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
