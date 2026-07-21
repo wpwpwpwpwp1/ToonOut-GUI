@@ -17,6 +17,9 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QDesktopServices,
+    QFont,
+    QFontDatabase,
+    QGuiApplication,
     QIcon,
     QImageReader,
     QMouseEvent,
@@ -133,6 +136,24 @@ def bundled_resource_path(*parts: str) -> Path:
 
 def application_icon_path() -> Path:
     return bundled_resource_path("assets", "toonout.ico")
+
+
+def configure_application_font(application: QApplication) -> None:
+    """운영체제 UI 글꼴에 색 번짐 없는 안티앨리어싱을 적용한다."""
+
+    system_font = QFontDatabase.systemFont(
+        QFontDatabase.SystemFont.GeneralFont
+    )
+    font = QFont(system_font)
+    # Segoe UI로 ASCII 경로의 역슬래시를 보존하고, 맑은 고딕으로 한글
+    # 글리프를 보완한다. QFont의 families API를 써야 실제 fallback 목록이 된다.
+    families = ["Segoe UI", system_font.family(), "Malgun Gothic"]
+    font.setFamilies(list(dict.fromkeys(families)))
+    font.setStyleStrategy(
+        QFont.StyleStrategy.PreferAntialias
+        | QFont.StyleStrategy.NoSubpixelAntialias
+    )
+    application.setFont(font)
 
 
 class MainWindow(QMainWindow):
@@ -2702,8 +2723,15 @@ if __name__ == "__main__":
         raise SystemExit(
             run_model_cleanup_worker(app_arguments.model_cleanup_worker)
         )
+    # Qt Widgets는 Windows의 125%·150%·175% 같은 분수 배율에서 글자와
+    # 테두리 픽셀을 서로 다르게 반올림할 수 있다. 앱 생성 전에 정수 배율로
+    # 맞춰 글꼴과 위젯 좌표가 같은 픽셀 격자를 사용하게 한다.
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.Round
+    )
     app = QApplication([sys.argv[0], *qt_arguments])
     app.setStyle("Fusion")
+    configure_application_font(app)
     app_icon = QIcon(str(application_icon_path()))
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)

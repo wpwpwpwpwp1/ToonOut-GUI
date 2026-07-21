@@ -1,6 +1,10 @@
 """ToonOut 모델을 UI 코드에서 분리한 추론 어댑터."""
 
+import hashlib
+import importlib.util
 import os
+import sys
+import types
 import warnings
 from pathlib import Path
 from typing import Callable
@@ -11,7 +15,6 @@ from app_settings import configure_huggingface_environment, default_model_direct
 
 BASE_MODEL_REPOSITORY = "ZhengPeng7/BiRefNet"
 BASE_MODEL_REVISION = "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4"
-BASE_MODEL_CONFIG_CLASS = "BiRefNet_config.BiRefNetConfig"
 BASE_MODEL_CODE_FILES = (
     "config.json",
     "birefnet.py",
@@ -69,22 +72,55 @@ def _download_progress_class(
 
 
 def _load_birefnet_classes(snapshot_directory: str | Path):
-    """이미 받은 고정 스냅샷에서 구성과 모델 클래스를 직접 불러온다."""
+    """고정 스냅샷 코드를 Hub 재조회 없이 로컬에서만 불러온다."""
 
-    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+    snapshot = Path(snapshot_directory).resolve()
+    config_path = snapshot / "BiRefNet_config.py"
+    model_path = snapshot / "birefnet.py"
+    for required_path in (config_path, model_path):
+        if not required_path.is_file():
+            raise RuntimeError(
+                f"BiRefNet 구성 파일이 없습니다: {required_path.name}"
+            )
 
-    snapshot = str(snapshot_directory)
-    config_class = get_class_from_dynamic_module(
-        BASE_MODEL_CONFIG_CLASS,
-        snapshot,
-        local_files_only=True,
-    )
-    model_class = get_class_from_dynamic_module(
-        "birefnet.BiRefNet",
-        snapshot,
-        local_files_only=True,
-    )
-    return config_class, model_class
+    # Hugging Face 캐시 경로에는 ``models--...``가 들어간다. Transformers의
+    # 동적 로더에 이 경로를 다시 넘기면 일부 패키징 환경에서 원격 저장소 ID로
+    # 오인할 수 있으므로, 고정 리비전의 두 파일을 임시 로컬 패키지로 로드한다.
+    path_digest = hashlib.sha256(os.fsencode(snapshot)).hexdigest()[:16]
+    package_name = f"_toonout_birefnet_{path_digest}"
+    config_module_name = f"{package_name}.BiRefNet_config"
+    model_module_name = f"{package_name}.birefnet"
+    module_names = (model_module_name, config_module_name, package_name)
+    for module_name in module_names:
+        sys.modules.pop(module_name, None)
+
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(snapshot)]
+    package.__package__ = package_name
+    sys.modules[package_name] = package
+
+    def load_module(module_name: str, source_path: Path):
+        specification = importlib.util.spec_from_file_location(
+            module_name,
+            source_path,
+        )
+        if specification is None or specification.loader is None:
+            raise RuntimeError(
+                f"BiRefNet 구성 파일을 열 수 없습니다: {source_path.name}"
+            )
+        module = importlib.util.module_from_spec(specification)
+        sys.modules[module_name] = module
+        specification.loader.exec_module(module)
+        return module
+
+    try:
+        config_module = load_module(config_module_name, config_path)
+        model_module = load_module(model_module_name, model_path)
+        return config_module.BiRefNetConfig, model_module.BiRefNet
+    except Exception:
+        for module_name in module_names:
+            sys.modules.pop(module_name, None)
+        raise
 
 
 def _existing_alpha(image):
@@ -286,9 +322,8 @@ class ToonOutEngine:
         config_class, model_class = _load_birefnet_classes(
             base_snapshot_directory
         )
-        config = config_class.from_pretrained(
-            base_snapshot_directory,
-            local_files_only=True,
+        config = config_class.from_json_file(
+            str(base_snapshot_directory / "config.json")
         )
         with torch.device("meta"):
             model = model_class(config=config)

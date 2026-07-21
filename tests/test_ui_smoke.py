@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QTimer,
     QUrl,
 )
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QFont, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from acceleration import AccelerationInfo, AccelerationMode, NvidiaDevice
 from app_core import BatchItem, ItemState, OutputNamingPolicy
-from main import BRAND_MASCOT_SIZE, MainWindow
+from main import BRAND_MASCOT_SIZE, MainWindow, configure_application_font
 from mascot import TsunaoState, TsunaoWidget
 from processing import ModelInstallProcess
 from widgets import (
@@ -586,6 +586,11 @@ class UiSmokeTests(unittest.TestCase):
                     dialog.space_label.geometry()
                 )
             )
+            self.assertTrue(
+                dialog.storage_card.rect().contains(
+                    dialog.path_field.geometry()
+                )
+            )
             self.assertEqual(dialog.install_button.text(), "모델 설치")
             dialog.install_button.click()
 
@@ -605,9 +610,37 @@ class UiSmokeTests(unittest.TestCase):
             dialog.cancel_button.click()
             self.assertEqual(cancellations, [True])
 
+            dialog.show_failure(
+                "C:/a/very/long/model/cache/snapshot does not appear to "
+                "have a file named BiRefNet_config.py. " * 3
+            )
+            self.app.processEvents()
+            self.assertTrue(
+                dialog.storage_card.rect().contains(
+                    dialog.path_field.geometry()
+                )
+            )
+            self.assertFalse(
+                dialog.storage_card.geometry().intersects(
+                    dialog.status_label.geometry()
+                )
+            )
+
             dialog.close()
             self.app.processEvents()
             self.assertFalse(dialog.isVisible())
+
+    def test_application_font_uses_fallbacks_without_subpixel_color(self):
+        configure_application_font(self.app)
+
+        font = self.app.font()
+        self.assertEqual(font.families()[0], "Segoe UI")
+        self.assertTrue(
+            font.styleStrategy() & QFont.StyleStrategy.PreferAntialias
+        )
+        self.assertTrue(
+            font.styleStrategy() & QFont.StyleStrategy.NoSubpixelAntialias
+        )
 
     def test_gpu_install_dialog_shows_status_and_percent(self):
         dialog = ModelOperationDialog(

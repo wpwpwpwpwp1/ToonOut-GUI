@@ -5,7 +5,6 @@ APP_STYLESHEET = """
 QWidget#root {
     background: #f5f7fb;
     color: #1e2430;
-    font-family: "Segoe UI", "Malgun Gothic";
     font-size: 14px;
 }
 QLabel#appTitle {

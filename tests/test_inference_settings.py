@@ -1,6 +1,7 @@
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, call, patch
+from unittest.mock import patch
 
 import torch
 
@@ -15,31 +16,28 @@ from inference import (
 
 class InferenceModelDirectoryTests(unittest.TestCase):
     def test_birefnet_loader_uses_downloaded_snapshot_without_remote_lookup(self):
-        config_class = Mock()
-        model_class = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            (snapshot / "BiRefNet_config.py").write_text(
+                "class BiRefNetConfig:\n    pass\n",
+                encoding="utf-8",
+            )
+            (snapshot / "birefnet.py").write_text(
+                "from .BiRefNet_config import BiRefNetConfig\n"
+                "class BiRefNet:\n"
+                "    config_class = BiRefNetConfig\n",
+                encoding="utf-8",
+            )
 
-        with patch(
-            "transformers.dynamic_module_utils.get_class_from_dynamic_module",
-            side_effect=[config_class, model_class],
-        ) as get_class:
-            loaded = _load_birefnet_classes("C:/model-cache/snapshot")
+            with patch(
+                "transformers.dynamic_module_utils.get_class_from_dynamic_module"
+            ) as remote_loader:
+                config_class, model_class = _load_birefnet_classes(snapshot)
 
-        self.assertEqual(loaded, (config_class, model_class))
-        self.assertEqual(
-            get_class.call_args_list,
-            [
-                call(
-                    "BiRefNet_config.BiRefNetConfig",
-                    "C:/model-cache/snapshot",
-                    local_files_only=True,
-                ),
-                call(
-                    "birefnet.BiRefNet",
-                    "C:/model-cache/snapshot",
-                    local_files_only=True,
-                ),
-            ],
-        )
+        remote_loader.assert_not_called()
+        self.assertEqual(config_class.__name__, "BiRefNetConfig")
+        self.assertEqual(model_class.__name__, "BiRefNet")
+        self.assertIs(model_class.config_class, config_class)
 
     def test_download_progress_maps_bytes_to_install_percent_range(self):
         events = []

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QListView,
     QListWidget,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStyle,
     QStyledItemDelegate,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -539,6 +541,7 @@ class ModelInstallDialog(QDialog):
         self.setMinimumWidth(640)
 
         layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(26, 24, 26, 22)
         layout.setSpacing(15)
 
@@ -558,9 +561,15 @@ class ModelInstallDialog(QDialog):
         description.setObjectName("mutedText")
         description.setWordWrap(True)
 
-        storage_card = QFrame()
-        storage_card.setObjectName("storageCard")
-        card_layout = QVBoxLayout(storage_card)
+        self.storage_card = QFrame()
+        self.storage_card.setObjectName("storageCard")
+        self.storage_card.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.storage_card.setMinimumHeight(92)
+        card_layout = QVBoxLayout(self.storage_card)
+        card_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         card_layout.setContentsMargins(16, 14, 16, 14)
         card_layout.setSpacing(8)
         path_label = QLabel("모델 저장 폴더")
@@ -606,7 +615,7 @@ class ModelInstallDialog(QDialog):
 
         layout.addLayout(title_row)
         layout.addWidget(description)
-        layout.addWidget(storage_card)
+        layout.addWidget(self.storage_card)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.status_label)
         layout.addLayout(button_row)
@@ -727,6 +736,27 @@ class ModelInstallDialog(QDialog):
         self.status_label.setObjectName("errorText")
         self.status_label.setStyleSheet("")
         self.status_label.setText(error)
+        # 오류 문장이 여러 줄로 늘어나도 저장 위치 카드가 눌려 입력창이
+        # 프레임 밖으로 나가지 않도록 대화상자를 새 내용 크기에 맞춘다.
+        layout = self.layout()
+        if layout is not None:
+            content_width = max(
+                1,
+                self.width()
+                - layout.contentsMargins().left()
+                - layout.contentsMargins().right(),
+            )
+            status_height = self.status_label.heightForWidth(content_width)
+            if status_height > 0:
+                self.status_label.setMinimumHeight(status_height)
+            layout.invalidate()
+            layout.activate()
+            minimum_size = layout.minimumSize()
+            self.setMinimumSize(minimum_size)
+            self.resize(
+                max(self.width(), minimum_size.width()),
+                max(self.height(), minimum_size.height()),
+            )
 
     def show_cancelling(self):
         self.cancel_button.setEnabled(False)
