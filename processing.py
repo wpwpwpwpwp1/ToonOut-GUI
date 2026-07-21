@@ -126,16 +126,54 @@ class InferenceThread(QThread):
     def friendly_error(error: Exception) -> str:
         message = str(error).strip()
         lowered = message.lower()
+        winerror = getattr(error, "winerror", None)
+        errno = getattr(error, "errno", None)
 
         if "out of memory" in lowered:
             return (
                 "메모리가 부족합니다. 성능 모드의 메모리 상한을 높이거나 "
                 "더 작은 이미지로 다시 시도하세요."
             )
-        if "connection" in lowered or "network" in lowered:
-            return "모델 파일을 받지 못했습니다. 인터넷 연결을 확인하세요."
-        if "no space" in lowered:
+        if (
+            winerror == 448
+            or "untrusted mount point" in lowered
+            or "신뢰할 수 없는 탑재 지점" in message
+            or "Windows 링크가 남아" in message
+        ):
+            return (
+                "Windows가 이전 모델 캐시의 링크를 차단했습니다. "
+                "ToonOut이 남은 캐시를 정리한 뒤에는 링크 없는 일반 파일로 "
+                "다시 설치합니다. 계속되면 기본 모델 저장 폴더를 선택하세요."
+            )
+        if winerror == 206 or "filename or extension is too long" in lowered:
+            return (
+                "모델 저장 경로가 너무 깁니다. 드라이브 루트에 가까운 짧은 "
+                "폴더(예: D:\\ToonOutModels)를 선택하세요."
+            )
+        if winerror in {112, 1816} or errno == 28 or "no space" in lowered:
             return "저장 공간이 부족합니다. 여유 공간을 확보하세요."
+        if winerror in {32, 33} or "used by another process" in lowered:
+            return (
+                "다른 프로그램이 모델 파일을 사용 중입니다. 실행 중인 ToonOut "
+                "창과 백신 검사를 확인한 뒤 다시 시도하세요."
+            )
+        if "ssl" in lowered or "certificate" in lowered:
+            return (
+                "보안 연결을 확인하지 못했습니다. Windows 날짜·시간과 "
+                "회사/학교 네트워크의 HTTPS 인증서를 확인하세요."
+            )
+        if (
+            "connection" in lowered
+            or "network" in lowered
+            or "proxy" in lowered
+            or "timed out" in lowered
+            or "name resolution" in lowered
+            or "outgoing traffic" in lowered
+        ):
+            return (
+                "모델 파일을 받지 못했습니다. 인터넷 연결과 프록시·방화벽을 "
+                "확인한 뒤 다시 시도하세요."
+            )
         if (
             "not found in your environment" in lowered
             or "실행 구성요소가 누락" in message
@@ -148,14 +186,38 @@ class InferenceThread(QThread):
             isinstance(error, PermissionError)
             or "permission" in lowered
             or "access is denied" in lowered
+            or "액세스가 거부" in message
         ):
             return (
                 "모델 저장 폴더에 쓸 수 없습니다. "
                 "모델 설치 창에서 다른 폴더를 선택하세요."
             )
+        if (
+            "failed finding central directory" in lowered
+            or "invalid header" in lowered
+            or "corrupt" in lowered
+        ):
+            return (
+                "내려받은 모델 파일이 손상되었습니다. 남은 파일을 정리한 뒤 "
+                "모델 설치를 다시 시도하세요."
+            )
         if not message:
             return "알 수 없는 오류가 발생했습니다."
         return message[:240]
+
+    @staticmethod
+    def friendly_model_install_error(error: Exception) -> str:
+        """Map install failures without exposing raw user paths in the UI."""
+
+        friendly = InferenceThread.friendly_error(error)
+        raw_preview = str(error).strip()[:240]
+        if friendly != raw_preview:
+            return friendly
+        return (
+            "모델 설치 중 예상하지 못한 오류가 발생했습니다. 남은 파일을 "
+            "정리한 뒤 다시 시도하세요. 계속되면 모델 저장 위치를 바꾸거나 "
+            f"앱을 다시 설치하세요. 오류 종류: {type(error).__name__}"
+        )
 
     def run(self):
         try:
@@ -221,7 +283,10 @@ def run_model_install_worker(model_directory: str, status_path: str) -> int:
         emit("success")
         return 0
     except Exception as error:
-        emit("error", message=InferenceThread.friendly_error(error))
+        emit(
+            "error",
+            message=InferenceThread.friendly_model_install_error(error),
+        )
         return 1
 
 

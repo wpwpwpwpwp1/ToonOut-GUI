@@ -20,6 +20,7 @@ from model_installation import (
     repository_directory,
     snapshot_directory,
 )
+from model_files import has_link_free_layout, mark_link_free_layout
 from processing import run_model_cleanup_worker
 
 
@@ -74,7 +75,7 @@ class ModelInstallationStatusTests(unittest.TestCase):
     def test_untrusted_model_link_is_treated_as_not_installed(self):
         with patch.object(
             Path,
-            "is_file",
+            "stat",
             side_effect=OSError(448, "untrusted mount point"),
         ):
             self.assertFalse(model_is_installed("C:/models"))
@@ -84,7 +85,7 @@ class ModelInstallationStatusTests(unittest.TestCase):
         with (
             patch.object(
                 Path,
-                "is_file",
+                "stat",
                 side_effect=OSError(448, "untrusted mount point"),
             ),
             patch("model_installation.delete_model_files") as delete_model_files_mock,
@@ -115,6 +116,26 @@ class ModelInstallationStatusTests(unittest.TestCase):
             self.assertTrue(repaired)
             self.assertFalse(partial_repository.exists())
             self.assertTrue(unrelated.is_file())
+
+    def test_link_free_partial_download_is_preserved_for_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            partial_snapshot = snapshot_directory(
+                root,
+                BASE_MODEL_REPOSITORY,
+                BASE_MODEL_REVISION,
+            )
+            partial_snapshot.mkdir(parents=True)
+            partial_file = partial_snapshot / "config.json"
+            partial_file.write_text("{}", encoding="utf-8")
+            mark_link_free_layout(root)
+            messages = []
+
+            repaired = prepare_model_cache_for_install(root, messages.append)
+
+            self.assertFalse(repaired)
+            self.assertTrue(partial_file.is_file())
+            self.assertIn("이어받는 중", messages[0])
 
 
 class ModelFileOperationTests(unittest.TestCase):
@@ -149,6 +170,7 @@ class ModelFileOperationTests(unittest.TestCase):
 
             self.assertTrue(source_removed)
             self.assertTrue(model_is_installed(destination))
+            self.assertTrue(has_link_free_layout(destination))
             self.assertFalse(model_is_installed(source))
             self.assertTrue((source / "keep.txt").is_file())
 
@@ -172,6 +194,7 @@ class ModelFileOperationTests(unittest.TestCase):
             delete_model_files(root)
 
             self.assertFalse(model_is_installed(root))
+            self.assertFalse(has_link_free_layout(root))
             self.assertTrue((root / "keep.txt").is_file())
             for repository in (BASE_MODEL_REPOSITORY, TOONOUT_REPOSITORY):
                 self.assertFalse(repository_directory(root, repository).exists())

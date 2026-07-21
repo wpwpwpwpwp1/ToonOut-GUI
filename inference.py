@@ -11,18 +11,18 @@ from typing import Callable
 from uuid import uuid4
 
 from app_settings import configure_huggingface_environment, default_model_directory
-
-
-BASE_MODEL_REPOSITORY = "ZhengPeng7/BiRefNet"
-BASE_MODEL_REVISION = "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4"
-BASE_MODEL_CODE_FILES = (
-    "config.json",
-    "birefnet.py",
-    "BiRefNet_config.py",
+from model_files import (
+    BASE_MODEL_CODE_FILES,
+    BASE_MODEL_REPOSITORY,
+    BASE_MODEL_REVISION,
+    TOONOUT_REPOSITORY,
+    TOONOUT_REVISION,
+    TOONOUT_WEIGHTS,
+    is_materialized_model_file,
+    mark_link_free_layout,
+    model_path_entry_exists,
+    snapshot_directory,
 )
-TOONOUT_REPOSITORY = "joelseytre/toonout"
-TOONOUT_REVISION = "cbf720eca394edcde66b861a8a8c20fbabe9c748"
-TOONOUT_WEIGHTS = "birefnet_finetuned_toonout.pth"
 
 
 def _download_progress_class(
@@ -74,11 +74,13 @@ def _download_progress_class(
 def _load_birefnet_classes(snapshot_directory: str | Path):
     """고정 스냅샷 코드를 Hub 재조회 없이 로컬에서만 불러온다."""
 
-    snapshot = Path(snapshot_directory).resolve()
+    # Normalize the package path without following a legacy cache link.
+    # Path.resolve() is the operation that raised WinError 448 in v0.1.8.
+    snapshot = Path(os.path.abspath(snapshot_directory))
     config_path = snapshot / "BiRefNet_config.py"
     model_path = snapshot / "birefnet.py"
     for required_path in (config_path, model_path):
-        if not required_path.is_file():
+        if not is_materialized_model_file(required_path):
             raise RuntimeError(
                 f"BiRefNet 구성 파일이 없습니다: {required_path.name}"
             )
@@ -121,6 +123,51 @@ def _load_birefnet_classes(snapshot_directory: str | Path):
         for module_name in module_names:
             sys.modules.pop(module_name, None)
         raise
+
+
+def _materialize_hub_file(
+    download_file: Callable[..., str],
+    *,
+    model_directory: str | Path,
+    repository: str,
+    revision: str,
+    filename: str,
+    tqdm_class=None,
+) -> Path:
+    """Download one pinned Hub file as a regular app-owned local file."""
+
+    local_directory = snapshot_directory(
+        model_directory,
+        repository,
+        revision,
+    )
+    local_directory.mkdir(parents=True, exist_ok=True)
+    expected_path = local_directory / filename
+    if is_materialized_model_file(expected_path):
+        return expected_path
+    if model_path_entry_exists(expected_path):
+        raise RuntimeError(
+            "기존 모델 캐시에 Windows 링크가 남아 있습니다. "
+            "모델 설치를 다시 시작해 캐시를 정리하세요."
+        )
+
+    downloaded_path = Path(
+        download_file(
+            repo_id=repository,
+            filename=filename,
+            revision=revision,
+            local_dir=str(local_directory),
+            tqdm_class=tqdm_class,
+        )
+    )
+    if (
+        os.path.normcase(os.path.abspath(downloaded_path))
+        != os.path.normcase(os.path.abspath(expected_path))
+    ):
+        raise RuntimeError(f"모델 파일 저장 위치가 일치하지 않습니다: {filename}")
+    if not is_materialized_model_file(expected_path):
+        raise RuntimeError(f"모델 파일 다운로드를 확인하지 못했습니다: {filename}")
+    return expected_path
 
 
 def _existing_alpha(image):
@@ -257,7 +304,7 @@ class ToonOutEngine:
         progress("설치 준비 중", 0)
         self._model_directory.mkdir(parents=True, exist_ok=True)
         configure_huggingface_environment(self._model_directory)
-        cache_directory = str(self._model_directory)
+        mark_link_free_layout(self._model_directory)
 
         progress("추론 라이브러리 확인 중", 5)
 
@@ -281,7 +328,6 @@ class ToonOutEngine:
             config_class._toonout_compatibility_patch = True
 
         code_ranges = ((8, 12), (12, 16), (16, 20))
-        base_snapshot_directory: Path | None = None
         for filename, (start_percent, end_percent) in zip(
             BASE_MODEL_CODE_FILES,
             code_ranges,
@@ -290,33 +336,31 @@ class ToonOutEngine:
             status = "모델 구성 파일 다운로드 중"
             if report_progress is not None:
                 report_progress(status, start_percent)
-            downloaded_path = Path(
-                hf_hub_download(
-                    repo_id=BASE_MODEL_REPOSITORY,
-                    filename=filename,
-                    revision=BASE_MODEL_REVISION,
-                    cache_dir=cache_directory,
-                    tqdm_class=(
-                        _download_progress_class(
-                            report_progress,
-                            status,
-                            start_percent,
-                            end_percent,
-                        )
-                        if report_progress is not None
-                        else None
-                    ),
-                )
+            _materialize_hub_file(
+                hf_hub_download,
+                model_directory=self._model_directory,
+                repository=BASE_MODEL_REPOSITORY,
+                revision=BASE_MODEL_REVISION,
+                filename=filename,
+                tqdm_class=(
+                    _download_progress_class(
+                        report_progress,
+                        status,
+                        start_percent,
+                        end_percent,
+                    )
+                    if report_progress is not None
+                    else None
+                ),
             )
-            if base_snapshot_directory is None:
-                base_snapshot_directory = downloaded_path.parent
-            elif downloaded_path.parent != base_snapshot_directory:
-                raise RuntimeError("BiRefNet 구성 파일 위치가 일치하지 않습니다.")
             if report_progress is not None:
                 report_progress(status, end_percent)
 
-        if base_snapshot_directory is None:
-            raise RuntimeError("BiRefNet 구성 파일을 찾지 못했습니다.")
+        base_snapshot_directory = snapshot_directory(
+            self._model_directory,
+            BASE_MODEL_REPOSITORY,
+            BASE_MODEL_REVISION,
+        )
 
         progress("BiRefNet 모델 구조 준비 중", 22)
         config_class, model_class = _load_birefnet_classes(
@@ -329,11 +373,12 @@ class ToonOutEngine:
             model = model_class(config=config)
 
         progress("ToonOut 가중치 다운로드 중", 25)
-        checkpoint_path = hf_hub_download(
-            repo_id=TOONOUT_REPOSITORY,
-            filename=TOONOUT_WEIGHTS,
+        checkpoint_path = _materialize_hub_file(
+            hf_hub_download,
+            model_directory=self._model_directory,
+            repository=TOONOUT_REPOSITORY,
             revision=TOONOUT_REVISION,
-            cache_dir=cache_directory,
+            filename=TOONOUT_WEIGHTS,
             tqdm_class=(
                 _download_progress_class(
                     report_progress,

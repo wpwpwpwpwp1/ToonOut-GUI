@@ -9,12 +9,67 @@ from inference import (
     ToonOutEngine,
     _download_progress_class,
     _load_birefnet_classes,
+    _materialize_hub_file,
     prepare_model_for_device,
     verify_model_runtime_dependencies,
 )
+from model_files import snapshot_directory
 
 
 class InferenceModelDirectoryTests(unittest.TestCase):
+    def test_hub_file_is_materialized_without_snapshot_cache_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+
+            def fake_download(**kwargs):
+                calls.append(kwargs)
+                destination = Path(kwargs["local_dir"]) / kwargs["filename"]
+                destination.write_text("model fixture", encoding="utf-8")
+                return str(destination)
+
+            downloaded = _materialize_hub_file(
+                fake_download,
+                model_directory=directory,
+                repository="owner/model",
+                revision="pinned-revision",
+                filename="config.json",
+            )
+
+            self.assertEqual(
+                downloaded,
+                snapshot_directory(
+                    directory,
+                    "owner/model",
+                    "pinned-revision",
+                ) / "config.json",
+            )
+            self.assertFalse(downloaded.is_symlink())
+            self.assertNotIn("cache_dir", calls[0])
+            self.assertEqual(calls[0]["local_dir"], str(downloaded.parent))
+
+    def test_existing_materialized_file_loads_without_network_lookup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            existing = snapshot_directory(
+                directory,
+                "owner/model",
+                "pinned-revision",
+            ) / "config.json"
+            existing.parent.mkdir(parents=True)
+            existing.write_text("model fixture", encoding="utf-8")
+
+            def unexpected_download(**_kwargs):
+                raise AssertionError("설치된 모델은 네트워크를 다시 조회하면 안 됩니다")
+
+            downloaded = _materialize_hub_file(
+                unexpected_download,
+                model_directory=directory,
+                repository="owner/model",
+                revision="pinned-revision",
+                filename="config.json",
+            )
+
+            self.assertEqual(downloaded, existing)
+
     def test_birefnet_loader_uses_downloaded_snapshot_without_remote_lookup(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory)

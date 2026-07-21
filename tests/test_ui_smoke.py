@@ -33,7 +33,7 @@ from acceleration import AccelerationInfo, AccelerationMode, NvidiaDevice
 from app_core import BatchItem, ItemState, OutputNamingPolicy
 from main import BRAND_MASCOT_SIZE, MainWindow, configure_application_font
 from mascot import TsunaoState, TsunaoWidget
-from processing import ModelInstallProcess
+from processing import InferenceThread, ModelInstallProcess
 from widgets import (
     AccelerationDialog,
     ModelInstallDialog,
@@ -576,6 +576,14 @@ class UiSmokeTests(unittest.TestCase):
             )
             cancellations = []
             dialog.cancel_requested.connect(lambda: cancellations.append(True))
+            expected_width = min(
+                920,
+                max(
+                    dialog.minimumWidth(),
+                    dialog.screen().availableGeometry().width() - 32,
+                ),
+            )
+            self.assertEqual(dialog.width(), expected_width)
             dialog.show()
             dialog.resize(640, 371)
             self.app.processEvents()
@@ -629,6 +637,31 @@ class UiSmokeTests(unittest.TestCase):
             dialog.close()
             self.app.processEvents()
             self.assertFalse(dialog.isVisible())
+
+    def test_untrusted_mount_error_is_actionable_and_hides_raw_path(self):
+        class UntrustedMountError(OSError):
+            winerror = 448
+
+        message = InferenceThread.friendly_error(
+            UntrustedMountError(
+                "C:/Users/example/AppData/Local/ToonOut/models/snapshots/private"
+            )
+        )
+
+        self.assertIn("이전 모델 캐시", message)
+        self.assertIn("링크 없는 일반 파일", message)
+        self.assertNotIn("C:/Users/example", message)
+
+    def test_unexpected_install_error_hides_private_path(self):
+        message = InferenceThread.friendly_model_install_error(
+            RuntimeError(
+                "C:/Users/example/private/models/custom-loader.py failed"
+            )
+        )
+
+        self.assertIn("예상하지 못한 오류", message)
+        self.assertIn("RuntimeError", message)
+        self.assertNotIn("C:/Users/example", message)
 
     def test_application_font_uses_fallbacks_without_subpixel_color(self):
         configure_application_font(self.app)

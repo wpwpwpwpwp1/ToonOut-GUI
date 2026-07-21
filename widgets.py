@@ -556,7 +556,7 @@ class ModelInstallDialog(QDialog):
 
         description = QLabel(
             "모델은 선택한 폴더에 저장되고 이 컴퓨터에서만 실행됩니다. "
-            "다운로드와 캐시를 위해 여러 GB의 여유 공간을 권장합니다."
+            "다운로드와 설치를 위해 3 GB 이상의 여유 공간을 권장합니다."
         )
         description.setObjectName("mutedText")
         description.setWordWrap(True)
@@ -602,6 +602,11 @@ class ModelInstallDialog(QDialog):
         self.status_label = QLabel("설치를 시작하면 필요한 파일을 내려받습니다")
         self.status_label.setObjectName("mutedText")
         self.status_label.setWordWrap(True)
+        self.status_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.status_label.setAccessibleName("모델 설치 상태")
 
         button_row = QHBoxLayout()
         self.cancel_button = QPushButton("취소")
@@ -624,6 +629,15 @@ class ModelInstallDialog(QDialog):
         self.cancel_button.clicked.connect(self._handle_cancel_action)
         self.install_button.clicked.connect(self._handle_primary_action)
         self._refresh_space_label()
+
+        # Give paths and recovery guidance useful horizontal space while still
+        # fitting high-DPI and narrow displays with a small outer margin.
+        available_width = self.screen().availableGeometry().width()
+        initial_width = min(
+            920,
+            max(self.minimumWidth(), available_width - 32),
+        )
+        self.resize(initial_width, self.sizeHint().height())
 
     @property
     def selected_directory(self) -> Path:
@@ -677,6 +691,7 @@ class ModelInstallDialog(QDialog):
         self.cancel_button.setEnabled(True)
         self.install_button.setEnabled(False)
         self.progress_bar.show()
+        self._reset_failure_layout()
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
         self.set_progress("설치 준비 중", 0)
@@ -725,6 +740,12 @@ class ModelInstallDialog(QDialog):
         )
         self.status_label.setText(f"[{status}] {self._progress}%")
 
+    def _reset_failure_layout(self):
+        self.status_label.setMinimumHeight(0)
+        self.status_label.setToolTip("")
+        self.status_label.setAccessibleDescription("")
+        self.setMinimumSize(640, 0)
+
     def show_failure(self, error: str):
         self._installing = False
         self.browse_button.setEnabled(True)
@@ -736,6 +757,8 @@ class ModelInstallDialog(QDialog):
         self.status_label.setObjectName("errorText")
         self.status_label.setStyleSheet("")
         self.status_label.setText(error)
+        self.status_label.setToolTip(error)
+        self.status_label.setAccessibleDescription(error)
         # 오류 문장이 여러 줄로 늘어나도 저장 위치 카드가 눌려 입력창이
         # 프레임 밖으로 나가지 않도록 대화상자를 새 내용 크기에 맞춘다.
         layout = self.layout()
@@ -773,6 +796,7 @@ class ModelInstallDialog(QDialog):
         self.install_button.setEnabled(True)
         self.progress_bar.hide()
         self._progress = None
+        self._reset_failure_layout()
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
         self.status_label.setText(
@@ -785,6 +809,7 @@ class ModelInstallDialog(QDialog):
         self.state_label.setText("● 설치됨")
         self.state_label.setObjectName("modelInstalledLabel")
         self.state_label.setStyleSheet("")
+        self._reset_failure_layout()
         self.set_progress("모델 설치 완료", 100)
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
