@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from inference import (
     BASE_MODEL_REPOSITORY,
@@ -15,6 +16,7 @@ from model_installation import (
     model_is_installed,
     model_storage_size,
     move_model_files,
+    prepare_model_cache_for_install,
     repository_directory,
     snapshot_directory,
 )
@@ -67,6 +69,33 @@ class ModelInstallationStatusTests(unittest.TestCase):
             (base_snapshot / "config.json").write_text("{}", encoding="utf-8")
 
             self.assertFalse(model_is_installed(root))
+
+    def test_untrusted_model_link_is_treated_as_not_installed(self):
+        with patch.object(
+            Path,
+            "is_file",
+            side_effect=OSError(448, "untrusted mount point"),
+        ):
+            self.assertFalse(model_is_installed("C:/models"))
+
+    def test_untrusted_model_link_is_removed_only_when_install_starts(self):
+        messages = []
+        with (
+            patch.object(
+                Path,
+                "is_file",
+                side_effect=OSError(448, "untrusted mount point"),
+            ),
+            patch("model_installation.delete_model_files") as delete_model_files_mock,
+        ):
+            repaired = prepare_model_cache_for_install(
+                "C:/models",
+                messages.append,
+            )
+
+        self.assertTrue(repaired)
+        delete_model_files_mock.assert_called_once_with("C:/models")
+        self.assertIn("이전 모델 캐시", messages[0])
 
 
 class ModelFileOperationTests(unittest.TestCase):

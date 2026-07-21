@@ -39,7 +39,9 @@ def snapshot_directory(
     return repository_directory(cache_directory, repository) / "snapshots" / revision
 
 
-def model_is_installed(cache_directory: str | Path) -> bool:
+def _required_model_paths(
+    cache_directory: str | Path,
+) -> tuple[tuple[str, tuple[Path, ...]], ...]:
     base_snapshot = snapshot_directory(
         cache_directory,
         BASE_MODEL_REPOSITORY,
@@ -50,13 +52,29 @@ def model_is_installed(cache_directory: str | Path) -> bool:
         TOONOUT_REPOSITORY,
         TOONOUT_REVISION,
     )
-
-    model_code_ready = all(
-        (base_snapshot / filename).is_file()
-        for filename in BASE_MODEL_CODE_FILES
+    return (
+        (
+            BASE_MODEL_REPOSITORY,
+            tuple(base_snapshot / filename for filename in BASE_MODEL_CODE_FILES),
+        ),
+        (
+            TOONOUT_REPOSITORY,
+            (toonout_snapshot / TOONOUT_WEIGHTS,),
+        ),
     )
-    toonout_weights_ready = (toonout_snapshot / TOONOUT_WEIGHTS).is_file()
-    return model_code_ready and toonout_weights_ready
+
+
+def model_is_installed(cache_directory: str | Path) -> bool:
+    try:
+        return all(
+            path.is_file()
+            for _repository, required_paths in _required_model_paths(cache_directory)
+            for path in required_paths
+        )
+    except OSError:
+        # 다른 PC에서 복사된 Hugging Face 심볼릭 링크는 Windows가 WinError
+        # 448로 차단할 수 있다. 시작 시 앱을 종료하지 말고 재설치 대상으로 본다.
+        return False
 
 
 def model_storage_size(cache_directory: str | Path) -> int:
@@ -112,6 +130,24 @@ def delete_model_files(
             shutil.rmtree(target)
         elif target.exists() or target.is_symlink():
             target.unlink()
+
+
+def prepare_model_cache_for_install(
+    cache_directory: str | Path,
+    report_status: StatusReporter | None = None,
+) -> bool:
+    """접근 불가능한 이전 PC의 모델 링크만 명시적 재설치 전에 정리한다."""
+
+    for _repository, required_paths in _required_model_paths(cache_directory):
+        for path in required_paths:
+            try:
+                path.is_file()
+            except OSError:
+                if report_status is not None:
+                    report_status("이 PC에서 사용할 수 없는 이전 모델 캐시를 정리하는 중")
+                delete_model_files(cache_directory)
+                return True
+    return False
 
 
 def move_model_files(

@@ -25,6 +25,7 @@ from model_installation import (
     delete_model_files,
     model_is_installed,
     move_model_files,
+    prepare_model_cache_for_install,
 )
 from performance import (
     PerformanceMode,
@@ -204,6 +205,10 @@ def run_model_install_worker(model_directory: str, status_path: str) -> int:
             status_file.flush()
 
     try:
+        prepare_model_cache_for_install(
+            model_directory,
+            lambda message: emit("status", message=message),
+        )
         engine = ToonOutEngine(model_directory)
         engine.load(lambda message: emit("status", message=message))
         emit("success")
