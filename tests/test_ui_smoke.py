@@ -695,6 +695,21 @@ class UiSmokeTests(unittest.TestCase):
         )
         dialog.close()
 
+    def test_gpu_install_button_starts_automatic_download_without_file_picker(self):
+        release = MagicMock()
+        with (
+            patch.object(MainWindow, "_refresh_acceleration_status"),
+            patch("main.current_gpu_pack_release", return_value=release),
+            patch.object(QFileDialog, "getOpenFileName") as file_dialog,
+        ):
+            window = MainWindow()
+            with patch.object(window, "_run_gpu_runtime_operation") as run:
+                window._install_gpu_runtime()
+
+            run.assert_called_once_with("install", pack_release=release)
+            file_dialog.assert_not_called()
+            window.close()
+
     def test_model_install_process_forwards_percent_event(self):
         process = ModelInstallProcess("C:/models")
         events = []

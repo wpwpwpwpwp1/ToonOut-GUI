@@ -70,10 +70,10 @@ from app_settings import (
 )
 from app_version import APP_VERSION, UPDATE_MANIFEST_URL
 from acceleration import AccelerationInfo, AccelerationMode
+from gpu_download import GpuPackRelease, current_gpu_pack_release
 from gpu_runtime import (
     GPU_RUNTIME_SETTING,
     default_gpu_runtime_directory,
-    find_adjacent_gpu_pack,
     gpu_runtime_is_compatible,
     gpu_runtime_is_installed,
     load_gpu_runtime_manifest,
@@ -852,30 +852,16 @@ class MainWindow(QMainWindow):
         )
 
     def _install_gpu_runtime(self):
-        adjacent_pack = find_adjacent_gpu_pack()
-        if adjacent_pack is not None:
-            pack_path = str(adjacent_pack)
-        else:
-            pack_path, _ = QFileDialog.getOpenFileName(
+        try:
+            release = current_gpu_pack_release(APP_VERSION)
+        except Exception as error:
+            QMessageBox.warning(
                 self,
-                "ToonOut NVIDIA GPU 가속 팩 선택",
-                str(Path.home() / "Downloads"),
-                "ToonOut GPU 가속 팩 (*.parts.json *.zip);;분할 팩 manifest (*.parts.json);;ZIP 파일 (*.zip)",
+                "GPU 가속 팩 자동 설치 불가",
+                str(error),
             )
-        if not pack_path:
             return
-
-        choice = QMessageBox.question(
-            self,
-            "GPU 가속 팩 설치",
-            "선택한 GPU 가속 팩을 ToonOut 사용자 폴더에 설치할까요?\n\n"
-            f"파일: {pack_path}\n"
-            f"설치 위치: {self._gpu_runtime_directory}\n\n"
-            "시스템 CUDA Toolkit이나 Python은 설치하지 않습니다.",
-        )
-        if choice != QMessageBox.StandardButton.Yes:
-            return
-        self._run_gpu_runtime_operation("install", pack_path)
+        self._run_gpu_runtime_operation("install", pack_release=release)
 
     def _remove_gpu_runtime(self):
         choice = QMessageBox.warning(
@@ -896,12 +882,13 @@ class MainWindow(QMainWindow):
         self,
         action: str,
         pack_path: str | None = None,
+        pack_release: GpuPackRelease | None = None,
     ):
         if self._gpu_runtime_thread is not None:
             return
         title = "GPU 가속 팩 설치" if action == "install" else "GPU 가속 팩 삭제"
         status = (
-            "가속 팩의 무결성을 확인하는 중"
+            "GPU 가속 팩 배포 정보 확인 중"
             if action == "install"
             else "GPU 가속 파일을 삭제하는 중"
         )
@@ -918,6 +905,7 @@ class MainWindow(QMainWindow):
             action,
             str(self._gpu_runtime_directory),
             pack_path,
+            pack_release,
         )
         self._gpu_runtime_thread = thread
         self._gpu_runtime_dialog = dialog

@@ -13,6 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, QThread, QTimer, Signal
 
 from acceleration import detect_acceleration
+from gpu_download import GpuPackRelease, download_and_install_gpu_runtime
 from gpu_runtime import (
     GpuRuntimeCancelled,
     delete_gpu_runtime,
@@ -766,11 +767,13 @@ class GpuRuntimeFileThread(QThread):
         action: str,
         runtime_directory: str,
         pack_path: str | None = None,
+        pack_release: GpuPackRelease | None = None,
     ):
         super().__init__()
         self._action = action
         self._runtime_directory = runtime_directory
         self._pack_path = pack_path
+        self._pack_release = pack_release
         self._cancel_event = threading.Event()
 
     def request_cancel(self) -> None:
@@ -778,14 +781,25 @@ class GpuRuntimeFileThread(QThread):
 
     def run(self):
         try:
-            if self._action == "install" and self._pack_path:
-                manifest = install_gpu_runtime(
-                    self._pack_path,
-                    self._runtime_directory,
-                    report=self.status_changed.emit,
-                    should_cancel=self._cancel_event.is_set,
-                    report_progress=self.progress_changed.emit,
-                )
+            if self._action == "install":
+                if self._pack_release is not None:
+                    manifest = download_and_install_gpu_runtime(
+                        self._pack_release,
+                        self._runtime_directory,
+                        report=self.status_changed.emit,
+                        cancelled=self._cancel_event.is_set,
+                        report_progress=self.progress_changed.emit,
+                    )
+                elif self._pack_path:
+                    manifest = install_gpu_runtime(
+                        self._pack_path,
+                        self._runtime_directory,
+                        report=self.status_changed.emit,
+                        should_cancel=self._cancel_event.is_set,
+                        report_progress=self.progress_changed.emit,
+                    )
+                else:
+                    raise ValueError("GPU 가속 팩 배포 정보가 없습니다.")
                 self.installed.emit(manifest)
                 return
             if self._action == "delete":

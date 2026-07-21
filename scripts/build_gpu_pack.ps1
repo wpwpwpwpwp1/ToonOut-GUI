@@ -52,6 +52,9 @@ if ($KeepSourceArchive) {
     $SplitArguments += "--keep-input"
 }
 python @SplitArguments
+python (Join-Path $ProjectRoot "scripts\update_gpu_pack_config.py") `
+    --manifest (Join-Path $ProjectRoot "dist\ToonOut-NVIDIA-GPU-Pack.parts.json") `
+    --config (Join-Path $ProjectRoot "gpu_download.py")
 
 if (-not $KeepBuildTree -and (Test-Path -LiteralPath $BuildRoot)) {
     $ResolvedBuild = (Resolve-Path -LiteralPath $BuildRoot).Path
@@ -62,4 +65,4 @@ if (-not $KeepBuildTree -and (Test-Path -LiteralPath $BuildRoot)) {
     Remove-Item -LiteralPath $ResolvedBuild -Recurse -Force
 }
 
-Write-Output "GPU pack Release parts created under dist."
+Write-Output "GPU pack Release parts created under dist. Commit the updated gpu_download.py before tagging the app release."

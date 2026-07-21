@@ -136,6 +136,7 @@ jobs:
           gh release create "$env:GITHUB_REF_NAME" `
             ".\dist\ToonOut-Setup-$env:TOONOUT_VERSION.exe" `
             ".\dist\update.json" `
+            --draft `
             --verify-tag `
             --title "ToonOut $env:TOONOUT_VERSION" `
             --generate-notes
@@ -149,6 +150,7 @@ jobs:
           gh release create "$env:GITHUB_REF_NAME" `
             ".\dist\ToonOut-Setup-$env:TOONOUT_VERSION.exe" `
             ".\dist\update.json" `
+            --draft `
             --verify-tag `
             --title "ToonOut $env:TOONOUT_VERSION (unsigned)" `
             --generate-notes

@@ -1081,8 +1081,8 @@ class AccelerationDialog(QDialog):
             return (
                 "GPU 가속 팩 업데이트가 필요합니다",
                 "설치된 팩은 현재 ToonOut의 성능 모드와 일시정지를 지원하지 않습니다.",
-                "최신 ToonOut 배포 파일에 포함된 GPU 가속 팩으로 업데이트하세요. "
-                "업데이트 전에도 CPU 처리는 계속 사용할 수 있습니다.",
+                "업데이트 버튼을 누르면 현재 ToonOut에 맞는 팩을 자동으로 "
+                "다운로드합니다. 업데이트 전에도 CPU 처리는 계속 사용할 수 있습니다.",
             )
         if info.mode == AccelerationMode.GPU_ACTIVE:
             return (
@@ -1103,10 +1103,9 @@ class AccelerationDialog(QDialog):
             return (
                 "이 PC에서 GPU 가속을 추가할 수 있습니다",
                 f"{info.device.name}을 찾았습니다. 같은 ToonOut 앱에 GPU 지원을 추가할 수 있습니다.",
-                "GPU 가속 팩은 수 GB의 저장 공간과 다운로드가 필요합니다. 팩에는 "
-                "PyTorch와 CUDA 실행 파일이 포함되므로 CUDA Toolkit을 따로 설치하지 "
-                "마세요. 최신 NVIDIA 드라이버를 권장하며 ToonOut 공식 배포 팩만 "
-                "설치하세요.",
+                "설치 버튼을 누르면 현재 ToonOut에 맞는 공식 GPU 팩을 자동으로 "
+                "다운로드하고 검증합니다. 설치 전 10GB 이상의 여유 공간이 필요합니다. "
+                "시스템 CUDA Toolkit이나 Python은 따로 설치하지 마세요.",
             )
         if info.mode == AccelerationMode.GPU_UNAVAILABLE:
             return (

@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ GPU_PACK_PARTS_KIND = "toonout-nvidia-gpu-pack-parts"
 GPU_PACK_PARTS_SCHEMA = 1
 MAX_PACK_FILES = 100_000
 MAX_UNCOMPRESSED_BYTES = 16 * 1024**3
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class GpuRuntimeError(RuntimeError):
@@ -47,23 +49,23 @@ class GpuRuntimeManifest:
 
 
 @dataclass(frozen=True)
-class _SplitPackPart:
+class GpuPackPart:
     path: Path
     size: int
     sha256: str
 
 
 @dataclass(frozen=True)
-class _SplitPack:
+class GpuPackParts:
     archive_size: int
     archive_sha256: str
-    parts: tuple[_SplitPackPart, ...]
+    parts: tuple[GpuPackPart, ...]
 
 
 class _SplitPackReader(io.RawIOBase):
     """여러 분할 파일을 복사 없이 하나의 seek 가능한 ZIP처럼 읽는다."""
 
-    def __init__(self, pack: _SplitPack):
+    def __init__(self, pack: GpuPackParts):
         super().__init__()
         self._parts = pack.parts
         self._size = pack.archive_size
@@ -327,7 +329,8 @@ def find_adjacent_gpu_pack(application_path: str | Path | None = None) -> Path |
     return None
 
 
-def _load_split_pack(manifest_path: Path) -> _SplitPack:
+def load_gpu_pack_parts(manifest_path: str | Path) -> GpuPackParts:
+    manifest_path = Path(manifest_path)
     try:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -345,6 +348,8 @@ def _load_split_pack(manifest_path: Path) -> _SplitPack:
         raise GpuRuntimeError("분할 GPU 가속 팩 정보가 올바르지 않습니다.") from error
     if archive_size <= 0 or archive_size > MAX_UNCOMPRESSED_BYTES:
         raise GpuRuntimeError("분할 GPU 가속 팩의 전체 크기가 올바르지 않습니다.")
+    if SHA256_PATTERN.fullmatch(archive_hash) is None:
+        raise GpuRuntimeError("분할 GPU 가속 팩의 전체 SHA-256이 올바르지 않습니다.")
     if not parts or len(parts) > 100:
         raise GpuRuntimeError("분할 GPU 가속 팩의 조각 수가 올바르지 않습니다.")
     pack_parts = []
@@ -358,18 +363,24 @@ def _load_split_pack(manifest_path: Path) -> _SplitPack:
         relative = _safe_relative_path(filename)
         if len(relative.parts) != 1:
             raise GpuRuntimeError("GPU 팩 조각은 manifest와 같은 폴더에 있어야 합니다.")
+        if expected_size <= 0 or expected_size > MAX_UNCOMPRESSED_BYTES:
+            raise GpuRuntimeError("GPU 팩 조각 크기가 올바르지 않습니다.")
+        if SHA256_PATTERN.fullmatch(expected_hash) is None:
+            raise GpuRuntimeError("GPU 팩 조각 SHA-256이 올바르지 않습니다.")
         pack_parts.append(
-            _SplitPackPart(
+            GpuPackPart(
                 manifest_path.parent / relative,
                 expected_size,
                 expected_hash,
             )
         )
-    return _SplitPack(archive_size, archive_hash, tuple(pack_parts))
+    if sum(part.size for part in pack_parts) != archive_size:
+        raise GpuRuntimeError("GPU 팩 조각 크기의 합계가 전체 크기와 다릅니다.")
+    return GpuPackParts(archive_size, archive_hash, tuple(pack_parts))
 
 
 def _verify_split_pack(
-    pack: _SplitPack,
+    pack: GpuPackParts,
     should_cancel: Callable[[], bool] | None = None,
     report_progress: Callable[[int, int], None] | None = None,
 ) -> None:
@@ -481,7 +492,7 @@ def install_gpu_runtime(
     try:
         if pack.name.endswith(".parts.json"):
             update("분할 GPU 가속 팩 검증 중", 5)
-            split_pack = _load_split_pack(pack)
+            split_pack = load_gpu_pack_parts(pack)
             _verify_split_pack(
                 split_pack,
                 should_cancel,
