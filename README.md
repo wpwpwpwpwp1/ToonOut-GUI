@@ -7,6 +7,9 @@ ToonOut/BiRefNet을 이용해 여러 애니메이션 이미지의 배경을 로�
 실사용자 설치 전 확인할 운영체제, RAM/GPU 및 정확한 디스크 여유 공간은
 [배포 요구 사양](docs/system-requirements.md)에 정리되어 있습니다.
 
+GUI의 사용자 흐름, 주요 기능, 개인정보 보호 및 용량 설명은
+[GUI 소개 스펙](docs/gui-product-spec.md)에서 확인할 수 있습니다.
+
 - 앱 코드: 프로젝트의 `LICENSE` 참고
 - ToonOut/BiRefNet: https://github.com/MatteoKartoon/BiRefNet
 - ToonOut weights: https://huggingface.co/joelseytre/toonout
