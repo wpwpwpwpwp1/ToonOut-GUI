@@ -562,9 +562,18 @@ class ModelInstallDialog(QDialog):
         storage_card.setObjectName("storageCard")
         card_layout = QVBoxLayout(storage_card)
         card_layout.setContentsMargins(16, 14, 16, 14)
-        card_layout.setSpacing(9)
+        card_layout.setSpacing(8)
         path_label = QLabel("모델 저장 폴더")
         path_label.setObjectName("fieldLabel")
+        self.space_label = QLabel()
+        self.space_label.setObjectName("storageSpace")
+        self.space_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        storage_header = QHBoxLayout()
+        storage_header.addWidget(path_label)
+        storage_header.addStretch()
+        storage_header.addWidget(self.space_label)
         path_row = QHBoxLayout()
         self.path_field = QLineEdit(str(self._directory))
         self.path_field.setObjectName("pathField")
@@ -573,11 +582,8 @@ class ModelInstallDialog(QDialog):
         self.browse_button.setObjectName("secondaryButton")
         path_row.addWidget(self.path_field, 1)
         path_row.addWidget(self.browse_button)
-        self.space_label = QLabel()
-        self.space_label.setObjectName("storageSpace")
-        card_layout.addWidget(path_label)
+        card_layout.addLayout(storage_header)
         card_layout.addLayout(path_row)
-        card_layout.addWidget(self.space_label)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -629,10 +635,10 @@ class ModelInstallDialog(QDialog):
     def _refresh_space_label(self):
         available_bytes = available_storage_bytes(self._directory)
         if available_bytes is None:
-            self.space_label.setText("사용 가능한 공간을 확인할 수 없습니다")
+            self.space_label.setText("여유 공간 확인 불가")
         else:
             self.space_label.setText(
-                f"사용 가능한 공간 · {format_storage_size(available_bytes)}"
+                f"여유 공간 · {format_storage_size(available_bytes)}"
             )
 
     def _handle_primary_action(self):
@@ -740,7 +746,7 @@ class ModelInstallDialog(QDialog):
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
         self.status_label.setText(
-            "모델 설치를 취소했습니다 · 내려받은 일부 파일은 다음 설치 때 재사용됩니다"
+            "모델 설치를 취소했습니다 · 내려받은 파일을 정리했습니다"
         )
 
     def show_success(self):

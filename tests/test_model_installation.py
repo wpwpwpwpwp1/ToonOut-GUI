@@ -20,6 +20,7 @@ from model_installation import (
     repository_directory,
     snapshot_directory,
 )
+from processing import run_model_cleanup_worker
 
 
 def create_fake_installation(directory: Path):
@@ -95,10 +96,46 @@ class ModelInstallationStatusTests(unittest.TestCase):
 
         self.assertTrue(repaired)
         delete_model_files_mock.assert_called_once_with("C:/models")
-        self.assertIn("이전 모델 캐시", messages[0])
+        self.assertIn("이전 모델 파일", messages[0])
+
+    def test_partial_cache_is_removed_before_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            partial_repository = repository_directory(
+                root,
+                BASE_MODEL_REPOSITORY,
+            )
+            partial_repository.mkdir(parents=True)
+            (partial_repository / "partial-download").write_bytes(b"partial")
+            unrelated = root / "keep.txt"
+            unrelated.write_text("keep", encoding="utf-8")
+
+            repaired = prepare_model_cache_for_install(root)
+
+            self.assertTrue(repaired)
+            self.assertFalse(partial_repository.exists())
+            self.assertTrue(unrelated.is_file())
 
 
 class ModelFileOperationTests(unittest.TestCase):
+    def test_cleanup_worker_removes_partial_models_but_preserves_other_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            partial_repository = repository_directory(
+                root,
+                TOONOUT_REPOSITORY,
+            )
+            partial_repository.mkdir(parents=True)
+            (partial_repository / "partial-download").write_bytes(b"partial")
+            unrelated = root / "keep.txt"
+            unrelated.write_text("keep", encoding="utf-8")
+
+            result = run_model_cleanup_worker(str(root))
+
+            self.assertEqual(result, 0)
+            self.assertFalse(partial_repository.exists())
+            self.assertTrue(unrelated.is_file())
+
     def test_move_verifies_destination_then_removes_only_source_models(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -120,6 +157,17 @@ class ModelFileOperationTests(unittest.TestCase):
             root = Path(directory)
             create_fake_installation(root)
             (root / "keep.txt").write_text("keep", encoding="utf-8")
+            local_module_cache = (
+                root
+                / "modules"
+                / "transformers_modules"
+                / BASE_MODEL_REVISION
+            )
+            local_module_cache.mkdir(parents=True)
+            (local_module_cache / "birefnet.py").write_text(
+                "# generated remote module",
+                encoding="utf-8",
+            )
 
             delete_model_files(root)
 
@@ -127,6 +175,7 @@ class ModelFileOperationTests(unittest.TestCase):
             self.assertTrue((root / "keep.txt").is_file())
             for repository in (BASE_MODEL_REPOSITORY, TOONOUT_REPOSITORY):
                 self.assertFalse(repository_directory(root, repository).exists())
+            self.assertFalse(local_module_cache.exists())
 
     def test_move_rejects_destination_inside_current_cache(self):
         with tempfile.TemporaryDirectory() as directory:

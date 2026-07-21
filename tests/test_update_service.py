@@ -119,6 +119,20 @@ class UpdateDownloadTests(unittest.TestCase):
             self.assertTrue(current.is_dir())
             self.assertTrue(unrelated.is_dir())
 
+    def test_startup_cleanup_removes_all_downloaded_update_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "0.1.5").mkdir()
+            (root / "0.1.6").mkdir()
+            unrelated = root / "manual-backup"
+            unrelated.mkdir()
+
+            prune_update_cache(root, None)
+
+            self.assertFalse((root / "0.1.5").exists())
+            self.assertFalse((root / "0.1.6").exists())
+            self.assertTrue(unrelated.is_dir())
+
     def test_download_is_verified_before_final_name_is_exposed(self):
         content = b"verified installer bytes"
         payload = valid_payload(content)

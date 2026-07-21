@@ -6,7 +6,17 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QSize, Qt, QUrl
+from PySide6.QtCore import (
+    QEvent,
+    QEventLoop,
+    QMimeData,
+    QPoint,
+    QPointF,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -567,8 +577,15 @@ class UiSmokeTests(unittest.TestCase):
             cancellations = []
             dialog.cancel_requested.connect(lambda: cancellations.append(True))
             dialog.show()
+            dialog.resize(640, 371)
+            self.app.processEvents()
 
             self.assertEqual(dialog.path_field.text(), directory)
+            self.assertFalse(
+                dialog.path_field.geometry().intersects(
+                    dialog.space_label.geometry()
+                )
+            )
             self.assertEqual(dialog.install_button.text(), "모델 설치")
             dialog.install_button.click()
 
@@ -628,6 +645,42 @@ class UiSmokeTests(unittest.TestCase):
         self.assertEqual(events, [("가중치 다운로드 중", 42)])
         process._remove_status_file()
         process.deleteLater()
+
+    def test_failed_model_install_starts_cleanup_before_reporting_failure(self):
+        process = ModelInstallProcess("C:/models")
+        process._last_error = "download failed"
+
+        with patch.object(process, "_start_cleanup_worker") as start_cleanup:
+            process._on_finished(1, None)
+
+        start_cleanup.assert_called_once_with()
+        self.assertFalse(process._settled)
+        process._remove_status_file()
+        process.deleteLater()
+
+    def test_failed_model_install_process_finishes_automatic_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            invalid_model_directory = Path(directory) / "not-a-directory"
+            invalid_model_directory.write_text("fixture", encoding="utf-8")
+            process = ModelInstallProcess(str(invalid_model_directory))
+            statuses = []
+            failures = []
+            loop = QEventLoop()
+            process.status_changed.connect(statuses.append)
+
+            def handle_failure(error: str):
+                failures.append(error)
+                loop.quit()
+
+            process.installation_failed.connect(handle_failure)
+            QTimer.singleShot(15_000, loop.quit)
+            process.start_installation()
+            loop.exec()
+
+            self.assertEqual(len(failures), 1)
+            self.assertIn("남은 모델 파일을 정리하는 중", statuses)
+            self.assertTrue(invalid_model_directory.is_file())
+            process.deleteLater()
 
     def test_model_status_reopens_background_installation(self):
         with (

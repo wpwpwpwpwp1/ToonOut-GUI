@@ -31,6 +31,26 @@ class UpdateWorkerTests(unittest.TestCase):
 
         self.assertEqual(available[0].version, "0.2.0")
 
+    def test_check_thread_cleans_installed_update_cache_before_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_update = Path(directory) / "0.1.6"
+            old_update.mkdir()
+            (old_update / "setup.exe").write_bytes(b"old installer")
+            thread = UpdateCheckThread(
+                "https://example/update.json",
+                "key",
+                "0.1.6",
+                directory,
+            )
+
+            with patch(
+                "update_workers.fetch_update_release",
+                return_value=release("0.1.6"),
+            ):
+                thread.run()
+
+            self.assertFalse(old_update.exists())
+
     def test_check_thread_maps_safe_failure_text(self):
         thread = UpdateCheckThread("https://example/update.json", "key", "0.1.0")
         failures = []

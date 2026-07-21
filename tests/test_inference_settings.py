@@ -1,42 +1,44 @@
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import torch
 
 from inference import (
     ToonOutEngine,
     _download_progress_class,
-    _load_birefnet_config,
+    _load_birefnet_classes,
     prepare_model_for_device,
     verify_model_runtime_dependencies,
 )
 
 
 class InferenceModelDirectoryTests(unittest.TestCase):
-    def test_birefnet_config_loader_bypasses_generic_model_type_detection(self):
-        config = object()
+    def test_birefnet_loader_uses_downloaded_snapshot_without_remote_lookup(self):
         config_class = Mock()
-        config_class.from_pretrained.return_value = config
+        model_class = Mock()
 
         with patch(
             "transformers.dynamic_module_utils.get_class_from_dynamic_module",
-            return_value=config_class,
+            side_effect=[config_class, model_class],
         ) as get_class:
-            loaded = _load_birefnet_config("C:/model-cache")
+            loaded = _load_birefnet_classes("C:/model-cache/snapshot")
 
-        self.assertIs(loaded, config)
-        get_class.assert_called_once_with(
-            "BiRefNet_config.BiRefNetConfig",
-            "ZhengPeng7/BiRefNet",
-            revision="e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4",
-            code_revision="e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4",
-            cache_dir="C:/model-cache",
-        )
-        config_class.from_pretrained.assert_called_once_with(
-            "ZhengPeng7/BiRefNet",
-            revision="e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4",
-            cache_dir="C:/model-cache",
+        self.assertEqual(loaded, (config_class, model_class))
+        self.assertEqual(
+            get_class.call_args_list,
+            [
+                call(
+                    "BiRefNet_config.BiRefNetConfig",
+                    "C:/model-cache/snapshot",
+                    local_files_only=True,
+                ),
+                call(
+                    "birefnet.BiRefNet",
+                    "C:/model-cache/snapshot",
+                    local_files_only=True,
+                ),
+            ],
         )
 
     def test_download_progress_maps_bytes_to_install_percent_range(self):

@@ -99,6 +99,7 @@ from processing import (
     InferenceThread,
     ModelFileThread,
     ModelInstallProcess,
+    run_model_cleanup_worker,
     run_model_install_worker,
 )
 from styles import APP_STYLESHEET
@@ -480,6 +481,7 @@ class MainWindow(QMainWindow):
             UPDATE_MANIFEST_URL,
             UPDATE_PUBLIC_KEY_B64,
             APP_VERSION,
+            default_update_directory(),
             self,
         )
         self._update_check_thread = thread
@@ -2678,6 +2680,7 @@ def parse_app_arguments(arguments: list[str]):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--model-directory")
     parser.add_argument("--model-install-worker")
+    parser.add_argument("--model-cleanup-worker")
     parser.add_argument("--model-install-status")
     parser.add_argument("--open-model-installer", action="store_true")
     parser.add_argument("--restore-image", action="append", default=[])
@@ -2694,6 +2697,10 @@ if __name__ == "__main__":
                 app_arguments.model_install_worker,
                 app_arguments.model_install_status,
             )
+        )
+    if app_arguments.model_cleanup_worker:
+        raise SystemExit(
+            run_model_cleanup_worker(app_arguments.model_cleanup_worker)
         )
     app = QApplication([sys.argv[0], *qt_arguments])
     app.setStyle("Fusion")

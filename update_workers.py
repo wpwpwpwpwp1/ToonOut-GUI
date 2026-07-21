@@ -25,15 +25,19 @@ class UpdateCheckThread(QThread):
         manifest_url: str,
         public_key_b64: str,
         current_version: str,
+        update_root: str | Path | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self._manifest_url = manifest_url
         self._public_key_b64 = public_key_b64
         self._current_version = current_version
+        self._update_root = Path(update_root) if update_root is not None else None
 
     def run(self):
         try:
+            if self._update_root is not None:
+                prune_update_cache(self._update_root, None)
             release = fetch_update_release(
                 self._manifest_url,
                 self._public_key_b64,

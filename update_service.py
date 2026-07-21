@@ -219,16 +219,21 @@ def verify_installer_file(release: UpdateRelease, path: str | Path) -> Path:
 
 def prune_update_cache(
     update_root: str | Path,
-    keep_version: str,
+    keep_version: str | None,
 ) -> None:
-    """앱이 만든 이전 버전 폴더만 지우고 알 수 없는 파일은 보존한다."""
-    parse_version(keep_version)
+    """앱이 만든 버전 폴더만 지우고 알 수 없는 파일은 보존한다."""
+    if keep_version is not None:
+        parse_version(keep_version)
     root = Path(update_root)
     if not root.is_dir():
         return
-    for child in root.iterdir():
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return
+    for child in children:
         if (
-            child.name == keep_version
+            (keep_version is not None and child.name == keep_version)
             or VERSION_PATTERN.fullmatch(child.name) is None
         ):
             continue

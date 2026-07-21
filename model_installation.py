@@ -108,6 +108,9 @@ def managed_model_directories(cache_directory: str | Path) -> list[Path]:
     targets.append(
         root / "modules" / "transformers_modules" / "ZhengPeng7" / "BiRefNet"
     )
+    targets.append(
+        root / "modules" / "transformers_modules" / BASE_MODEL_REVISION
+    )
     for target in targets:
         _assert_managed_child(root, target)
     return targets
@@ -132,17 +135,38 @@ def prepare_model_cache_for_install(
     cache_directory: str | Path,
     report_status: StatusReporter | None = None,
 ) -> bool:
-    """접근 불가능한 이전 PC의 모델 링크만 명시적 재설치 전에 정리한다."""
+    """완료된 설치는 보존하고 이전 실패·취소 캐시는 새 설치 전에 정리한다."""
 
-    for _repository, required_paths in _required_model_paths(cache_directory):
+    root = Path(cache_directory)
+    if model_is_installed(root):
+        return False
+
+    cleanup_needed = False
+    for _repository, required_paths in _required_model_paths(root):
         for path in required_paths:
             try:
                 path.is_file()
             except OSError:
-                if report_status is not None:
-                    report_status("이 PC에서 사용할 수 없는 이전 모델 캐시를 정리하는 중")
-                delete_model_files(cache_directory)
-                return True
+                cleanup_needed = True
+                break
+        if cleanup_needed:
+            break
+
+    for target in managed_model_directories(root):
+        if cleanup_needed:
+            break
+        try:
+            exists = target.exists() or target.is_symlink()
+        except OSError:
+            exists = True
+        if exists:
+            cleanup_needed = True
+
+    if cleanup_needed:
+        if report_status is not None:
+            report_status("완료되지 않은 이전 모델 파일을 정리하는 중")
+        delete_model_files(cache_directory)
+        return True
     return False
 
 

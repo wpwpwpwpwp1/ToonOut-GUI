@@ -225,6 +225,16 @@ def run_model_install_worker(model_directory: str, status_path: str) -> int:
         return 1
 
 
+def run_model_cleanup_worker(model_directory: str) -> int:
+    """실패하거나 취소한 설치가 남긴 앱 관리 모델 파일만 삭제한다."""
+
+    try:
+        delete_model_files(model_directory)
+        return 0
+    except (OSError, ValueError):
+        return 1
+
+
 class ModelInstallProcess(QProcess):
     """취소할 수 있는 별도 모델 설치 프로세스와 상태 파일을 관리한다."""
 
@@ -247,6 +257,8 @@ class ModelInstallProcess(QProcess):
         self._status_buffer = ""
         self._last_error: str | None = None
         self._cancel_requested = False
+        self._cleaning_up = False
+        self._cleanup_outcome = "failure"
         self._settled = False
 
         self._status_timer = QTimer(self)
@@ -262,6 +274,11 @@ class ModelInstallProcess(QProcess):
             "--model-install-status",
             str(self._status_path),
         ]
+        self._set_worker_command(worker_arguments)
+        self._status_timer.start()
+        self.start()
+
+    def _set_worker_command(self, worker_arguments: list[str]) -> None:
         if getattr(sys, "frozen", False):
             program = sys.executable
             arguments = worker_arguments
@@ -273,11 +290,9 @@ class ModelInstallProcess(QProcess):
             ]
         self.setProgram(program)
         self.setArguments(arguments)
-        self._status_timer.start()
-        self.start()
 
     def request_cancel(self) -> None:
-        if self.state() == QProcess.ProcessState.NotRunning:
+        if self._cleaning_up or self.state() == QProcess.ProcessState.NotRunning:
             return
         self._cancel_requested = True
         self.status_changed.emit("모델 설치를 취소하는 중")
@@ -285,7 +300,10 @@ class ModelInstallProcess(QProcess):
         QTimer.singleShot(2_000, self._kill_if_running)
 
     def _kill_if_running(self) -> None:
-        if self.state() != QProcess.ProcessState.NotRunning:
+        if (
+            not self._cleaning_up
+            and self.state() != QProcess.ProcessState.NotRunning
+        ):
             self.kill()
 
     def _read_status(self, final: bool = False) -> None:
@@ -324,25 +342,57 @@ class ModelInstallProcess(QProcess):
                 )
 
     def _on_process_error(self, error) -> None:
-        if (
-            error == QProcess.ProcessError.FailedToStart
-            and not self._cancel_requested
-        ):
+        if error != QProcess.ProcessError.FailedToStart:
+            return
+        if self._cleaning_up:
+            self._finish_cleanup(False)
+        elif not self._cancel_requested:
             self._settle_failure("모델 설치 작업을 시작하지 못했습니다.")
 
     def _on_finished(self, exit_code: int, _exit_status) -> None:
         if self._settled:
             return
+        if self._cleaning_up:
+            self._finish_cleanup(exit_code == 0)
+            return
         self._status_timer.stop()
         self._read_status(final=True)
-        if self._cancel_requested:
-            self._settled = True
-            self.installation_cancelled.emit()
-            self._remove_status_file()
-            return
         if exit_code == 0 and model_is_installed(self._model_directory):
             self._settled = True
             self.installation_succeeded.emit()
+            self._remove_status_file()
+            return
+
+        self._cleanup_outcome = (
+            "cancelled" if self._cancel_requested else "failure"
+        )
+        if self._last_error is None and self._cleanup_outcome == "failure":
+            self._last_error = (
+                "모델 설치를 완료하지 못했습니다. 다시 시도하세요."
+            )
+        self._start_cleanup_worker()
+
+    def _start_cleanup_worker(self) -> None:
+        self._cleaning_up = True
+        self.status_changed.emit("남은 모델 파일을 정리하는 중")
+        self._set_worker_command(
+            ["--model-cleanup-worker", self._model_directory]
+        )
+        self.start()
+
+    def _finish_cleanup(self, succeeded: bool) -> None:
+        self._cleaning_up = False
+        if not succeeded:
+            message = self._last_error or "모델 설치를 취소했습니다."
+            self._settle_failure(
+                f"{message} 남은 모델 파일을 자동으로 정리하지 못했습니다. "
+                "모델 저장 폴더에서 다시 시도하세요."
+            )
+            return
+
+        if self._cleanup_outcome == "cancelled":
+            self._settled = True
+            self.installation_cancelled.emit()
             self._remove_status_file()
             return
         self._settle_failure(

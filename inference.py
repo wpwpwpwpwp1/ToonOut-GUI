@@ -68,23 +68,23 @@ def _download_progress_class(
     return DownloadProgress
 
 
-def _load_birefnet_config(cache_directory: str):
-    """고정된 BiRefNet 구성 클래스를 직접 불러와 AutoConfig 판별을 피한다."""
+def _load_birefnet_classes(snapshot_directory: str | Path):
+    """이미 받은 고정 스냅샷에서 구성과 모델 클래스를 직접 불러온다."""
 
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
+    snapshot = str(snapshot_directory)
     config_class = get_class_from_dynamic_module(
         BASE_MODEL_CONFIG_CLASS,
-        BASE_MODEL_REPOSITORY,
-        revision=BASE_MODEL_REVISION,
-        code_revision=BASE_MODEL_REVISION,
-        cache_dir=cache_directory,
+        snapshot,
+        local_files_only=True,
     )
-    return config_class.from_pretrained(
-        BASE_MODEL_REPOSITORY,
-        revision=BASE_MODEL_REVISION,
-        cache_dir=cache_directory,
+    model_class = get_class_from_dynamic_module(
+        "birefnet.BiRefNet",
+        snapshot,
+        local_files_only=True,
     )
+    return config_class, model_class
 
 
 def _existing_alpha(image):
@@ -229,7 +229,6 @@ class ToonOutEngine:
         import transformers.configuration_utils
         from huggingface_hub import hf_hub_download
         from torchvision import transforms
-        from transformers import AutoModelForImageSegmentation
 
         verify_model_runtime_dependencies()
 
@@ -245,37 +244,54 @@ class ToonOutEngine:
             config_class.__getattribute__ = patched_getattribute
             config_class._toonout_compatibility_patch = True
 
-        if report_progress is not None:
-            code_ranges = ((8, 12), (12, 16), (16, 20))
-            for filename, (start_percent, end_percent) in zip(
-                BASE_MODEL_CODE_FILES,
-                code_ranges,
-                strict=True,
-            ):
-                status = "모델 구성 파일 다운로드 중"
+        code_ranges = ((8, 12), (12, 16), (16, 20))
+        base_snapshot_directory: Path | None = None
+        for filename, (start_percent, end_percent) in zip(
+            BASE_MODEL_CODE_FILES,
+            code_ranges,
+            strict=True,
+        ):
+            status = "모델 구성 파일 다운로드 중"
+            if report_progress is not None:
                 report_progress(status, start_percent)
+            downloaded_path = Path(
                 hf_hub_download(
                     repo_id=BASE_MODEL_REPOSITORY,
                     filename=filename,
                     revision=BASE_MODEL_REVISION,
                     cache_dir=cache_directory,
-                    tqdm_class=_download_progress_class(
-                        report_progress,
-                        status,
-                        start_percent,
-                        end_percent,
+                    tqdm_class=(
+                        _download_progress_class(
+                            report_progress,
+                            status,
+                            start_percent,
+                            end_percent,
+                        )
+                        if report_progress is not None
+                        else None
                     ),
                 )
+            )
+            if base_snapshot_directory is None:
+                base_snapshot_directory = downloaded_path.parent
+            elif downloaded_path.parent != base_snapshot_directory:
+                raise RuntimeError("BiRefNet 구성 파일 위치가 일치하지 않습니다.")
+            if report_progress is not None:
                 report_progress(status, end_percent)
 
+        if base_snapshot_directory is None:
+            raise RuntimeError("BiRefNet 구성 파일을 찾지 못했습니다.")
+
         progress("BiRefNet 모델 구조 준비 중", 22)
-        config = _load_birefnet_config(cache_directory)
+        config_class, model_class = _load_birefnet_classes(
+            base_snapshot_directory
+        )
+        config = config_class.from_pretrained(
+            base_snapshot_directory,
+            local_files_only=True,
+        )
         with torch.device("meta"):
-            model = AutoModelForImageSegmentation.from_config(
-                config,
-                trust_remote_code=True,
-                code_revision=BASE_MODEL_REVISION,
-            )
+            model = model_class(config=config)
 
         progress("ToonOut 가중치 다운로드 중", 25)
         checkpoint_path = hf_hub_download(
