@@ -23,10 +23,12 @@ from acceleration import AccelerationInfo, AccelerationMode, NvidiaDevice
 from app_core import BatchItem, ItemState, OutputNamingPolicy
 from main import BRAND_MASCOT_SIZE, MainWindow
 from mascot import TsunaoState, TsunaoWidget
+from processing import ModelInstallProcess
 from widgets import (
     AccelerationDialog,
     ModelInstallDialog,
     ModelManagementDialog,
+    ModelOperationDialog,
     OutputNamingDialog,
     ToonOutComboBox,
     ImageListWidget,
@@ -572,12 +574,60 @@ class UiSmokeTests(unittest.TestCase):
 
             self.assertEqual(dialog.cancel_button.text(), "설치 취소")
             self.assertTrue(dialog.cancel_button.isEnabled())
+            self.assertEqual(dialog.progress_bar.minimum(), 0)
+            self.assertEqual(dialog.progress_bar.maximum(), 100)
+            self.assertEqual(dialog.progress_bar.value(), 0)
+            self.assertEqual(dialog.status_label.text(), "[설치 준비 중] 0%")
+
+            dialog.set_progress("ToonOut 가중치 다운로드 중", 47)
+            self.assertEqual(dialog.progress_bar.value(), 47)
+            self.assertEqual(
+                dialog.status_label.text(),
+                "[ToonOut 가중치 다운로드 중] 47%",
+            )
             dialog.cancel_button.click()
             self.assertEqual(cancellations, [True])
 
             dialog.close()
             self.app.processEvents()
             self.assertFalse(dialog.isVisible())
+
+    def test_gpu_install_dialog_shows_status_and_percent(self):
+        dialog = ModelOperationDialog(
+            "GPU 가속 팩 설치",
+            "GPU 가속 팩 파일 목록 확인 중",
+            determinate=True,
+        )
+
+        self.assertEqual(
+            dialog.status_label.text(),
+            "[GPU 가속 팩 파일 목록 확인 중] 0%",
+        )
+        dialog.set_progress("GPU 가속 파일 설치 중", 63)
+
+        self.assertEqual(dialog.progress_bar.value(), 63)
+        self.assertEqual(
+            dialog.status_label.text(),
+            "[GPU 가속 파일 설치 중] 63%",
+        )
+        dialog.close()
+
+    def test_model_install_process_forwards_percent_event(self):
+        process = ModelInstallProcess("C:/models")
+        events = []
+        process.progress_changed.connect(
+            lambda status, percent: events.append((status, percent))
+        )
+        process._status_path.write_text(
+            '{"event":"progress","status":"가중치 다운로드 중","percent":42}\n',
+            encoding="utf-8",
+        )
+
+        process._read_status()
+
+        self.assertEqual(events, [("가중치 다운로드 중", 42)])
+        process._remove_status_file()
+        process.deleteLater()
 
     def test_model_status_reopens_background_installation(self):
         with (

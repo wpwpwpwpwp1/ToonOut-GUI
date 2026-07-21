@@ -168,12 +168,15 @@ def _raise_if_cancelled(
 def _sha256(
     path: Path,
     should_cancel: Callable[[], bool] | None = None,
+    report_bytes: Callable[[int], None] | None = None,
 ) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             _raise_if_cancelled(should_cancel)
             digest.update(chunk)
+            if report_bytes is not None:
+                report_bytes(len(chunk))
     return digest.hexdigest()
 
 
@@ -182,6 +185,7 @@ def load_gpu_runtime_manifest(
     *,
     verify_files: bool = True,
     should_cancel: Callable[[], bool] | None = None,
+    report_progress: Callable[[int, int], None] | None = None,
 ) -> GpuRuntimeManifest:
     runtime_directory = Path(directory)
     manifest_path = runtime_directory / "manifest.json"
@@ -214,6 +218,23 @@ def load_gpu_runtime_manifest(
     if not verify_files:
         return manifest
 
+    try:
+        total_expected_size = sum(
+            int(record["size"]) for record in manifest.files
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise GpuRuntimeError("GPU 가속 팩 파일 목록이 올바르지 않습니다.") from error
+    verified_size = 0
+
+    def report_verified(chunk_size: int) -> None:
+        nonlocal verified_size
+        verified_size += chunk_size
+        if report_progress is not None and total_expected_size > 0:
+            report_progress(
+                min(verified_size, total_expected_size),
+                total_expected_size,
+            )
+
     for record in manifest.files:
         _raise_if_cancelled(should_cancel)
         try:
@@ -226,7 +247,7 @@ def load_gpu_runtime_manifest(
         file_path = runtime_directory / relative
         if not file_path.is_file() or file_path.stat().st_size != expected_size:
             raise GpuRuntimeError(f"GPU 가속 팩 파일이 없거나 손상되었습니다: {relative}")
-        if _sha256(file_path, should_cancel) != expected_hash:
+        if _sha256(file_path, should_cancel, report_verified) != expected_hash:
             raise GpuRuntimeError(f"GPU 가속 팩 파일 검증에 실패했습니다: {relative}")
 
     return manifest
@@ -350,6 +371,7 @@ def _load_split_pack(manifest_path: Path) -> _SplitPack:
 def _verify_split_pack(
     pack: _SplitPack,
     should_cancel: Callable[[], bool] | None = None,
+    report_progress: Callable[[int, int], None] | None = None,
 ) -> None:
     archive_digest = hashlib.sha256()
     total_size = 0
@@ -367,6 +389,11 @@ def _verify_split_pack(
                 part_digest.update(chunk)
                 archive_digest.update(chunk)
                 read_size += len(chunk)
+                if report_progress is not None:
+                    report_progress(
+                        min(total_size + read_size, pack.archive_size),
+                        pack.archive_size,
+                    )
         if read_size != part.size or part_digest.hexdigest() != part.sha256:
             raise GpuRuntimeError(f"GPU 팩 조각 {index}의 검증에 실패했습니다.")
         total_size += read_size
@@ -420,18 +447,32 @@ def install_gpu_runtime(
     destination: str | Path | None = None,
     report: Callable[[str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    report_progress: Callable[[str, int], None] | None = None,
 ) -> GpuRuntimeManifest:
     pack = Path(pack_path)
     runtime_directory = Path(destination or default_gpu_runtime_directory())
     runtime_root = runtime_directory.parent
     runtime_root.mkdir(parents=True, exist_ok=True)
 
-    def update(message: str):
-        _raise_if_cancelled(should_cancel)
-        if report is not None:
-            report(message)
+    last_status: str | None = None
+    last_progress: tuple[str, int] | None = None
 
-    update("GPU 가속 팩의 파일 목록을 확인하는 중")
+    def update(message: str, percent: int | None = None):
+        nonlocal last_status, last_progress
+        _raise_if_cancelled(should_cancel)
+        if report is not None and message != last_status:
+            report(message)
+            last_status = message
+        if report_progress is not None and percent is not None:
+            clamped = max(0, min(100, percent))
+            if last_progress is not None:
+                clamped = max(last_progress[1], clamped)
+            event = (message, clamped)
+            if event != last_progress:
+                report_progress(*event)
+                last_progress = event
+
+    update("GPU 가속 팩 파일 목록 확인 중", 0)
     staging_directory = Path(
         tempfile.mkdtemp(prefix=".nvidia-gpu-install-", dir=runtime_root)
     )
@@ -439,13 +480,21 @@ def install_gpu_runtime(
     backup_directory: Path | None = None
     try:
         if pack.name.endswith(".parts.json"):
-            update("분할 GPU 가속 팩을 검증하는 중")
+            update("분할 GPU 가속 팩 검증 중", 5)
             split_pack = _load_split_pack(pack)
-            _verify_split_pack(split_pack, should_cancel)
+            _verify_split_pack(
+                split_pack,
+                should_cancel,
+                lambda completed, total: update(
+                    "분할 GPU 가속 팩 검증 중",
+                    5 + round(completed * 20 / total) if total else 25,
+                ),
+            )
             split_reader = _SplitPackReader(split_pack)
             archive_source = split_reader
         else:
             archive_source = pack
+        update("GPU 가속 파일 설치 준비 중", 25)
         with zipfile.ZipFile(archive_source) as archive:
             members = archive.infolist()
             if len(members) > MAX_PACK_FILES:
@@ -460,7 +509,8 @@ def install_gpu_runtime(
                     f"최소 {required_gb:.1f}GB의 여유 공간이 필요합니다."
                 )
 
-            update("GPU 가속 파일을 설치하는 중")
+            update("GPU 가속 파일 설치 중", 25)
+            extracted_size = 0
             for member in members:
                 relative = _safe_relative_path(member.filename)
                 target = staging_directory / relative
@@ -472,11 +522,22 @@ def install_gpu_runtime(
                     while chunk := source.read(1024 * 1024):
                         _raise_if_cancelled(should_cancel)
                         output.write(chunk)
+                        extracted_size += len(chunk)
+                        update(
+                            "GPU 가속 파일 설치 중",
+                            25 + round(extracted_size * 45 / total_size)
+                            if total_size
+                            else 70,
+                        )
 
-        update("설치된 GPU 가속 파일을 검증하는 중")
+        update("설치된 GPU 가속 파일 검증 중", 72)
         manifest = load_gpu_runtime_manifest(
             staging_directory,
             should_cancel=should_cancel,
+            report_progress=lambda completed, total: update(
+                "설치된 GPU 가속 파일 검증 중",
+                72 + round(completed * 18 / total) if total else 90,
+            ),
         )
         if not gpu_runtime_is_compatible(manifest):
             raise GpuRuntimeError(
@@ -484,11 +545,12 @@ def install_gpu_runtime(
                 "최신 GPU 가속 팩으로 업데이트하세요."
             )
 
-        update("GPU 가속 팩의 디스크 사용량을 줄이는 중")
+        update("GPU 가속 팩 디스크 사용량 최적화 중", 92)
         if not _compress_runtime_directory(staging_directory, should_cancel):
-            update("디스크 압축을 지원하지 않아 일반 방식으로 설치합니다")
+            update("일반 파일 방식으로 설치 중", 96)
         _raise_if_cancelled(should_cancel)
 
+        update("GPU 가속 팩 적용 중", 98)
         if runtime_directory.exists():
             backup_directory = runtime_root / (
                 f".{runtime_directory.name}-previous-{os.getpid()}"
@@ -500,8 +562,7 @@ def install_gpu_runtime(
         staging_directory = runtime_directory
         if backup_directory is not None:
             shutil.rmtree(backup_directory, ignore_errors=True)
-        if report is not None:
-            report("GPU 가속 팩 설치가 완료되었습니다")
+        update("GPU 가속 팩 설치 완료", 100)
         return load_gpu_runtime_manifest(runtime_directory, verify_files=False)
     except GpuRuntimeCancelled:
         if backup_directory is not None and not runtime_directory.exists():

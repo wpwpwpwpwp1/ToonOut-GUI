@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from inference import (
+    BASE_MODEL_CODE_FILES,
     BASE_MODEL_REPOSITORY,
     BASE_MODEL_REVISION,
     TOONOUT_REPOSITORY,
@@ -16,11 +17,6 @@ from inference import (
 
 StatusReporter = Callable[[str], None]
 MODEL_REPOSITORIES = (BASE_MODEL_REPOSITORY, TOONOUT_REPOSITORY)
-BASE_MODEL_CODE_FILES = (
-    "config.json",
-    "birefnet.py",
-    "BiRefNet_config.py",
-)
 
 
 def repository_cache_name(repository: str) -> str:

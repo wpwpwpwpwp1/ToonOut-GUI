@@ -371,7 +371,12 @@ class MainWindow(QMainWindow):
         self.update_status_button = QPushButton("업데이트 확인")
         self.update_status_button.setObjectName("updateCheckingButton")
         self.update_status_button.setAccessibleName("ToonOut 업데이트 상태")
-        self.update_status_button.hide()
+        self.update_status_button.setEnabled(bool(UPDATE_PUBLIC_KEY_B64))
+        self.update_status_button.setToolTip(
+            "GitHub Releases에서 최신 ToonOut 버전을 확인합니다"
+            if UPDATE_PUBLIC_KEY_B64
+            else "이 개발 빌드에는 업데이트 검증 키가 없습니다"
+        )
         self.model_status_button = QPushButton()
         self.model_status_button.setToolTip(
             "모델 설치 상태와 저장 위치를 확인합니다"
@@ -448,8 +453,14 @@ class MainWindow(QMainWindow):
         self.update_status_button.show()
         self._repolish_control(self.update_status_button)
 
-    def check_for_updates(self, *, show_status: bool = False):
+    def check_for_updates(self):
         if not UPDATE_PUBLIC_KEY_B64:
+            self._set_update_button(
+                "업데이트 확인",
+                "updateCheckingButton",
+                enabled=False,
+                tooltip="이 개발 빌드에는 업데이트 검증 키가 없습니다",
+            )
             return
         if (
             self._update_check_thread is not None
@@ -458,13 +469,12 @@ class MainWindow(QMainWindow):
             return
 
         self._update_error = None
-        if show_status:
-            self._set_update_button(
-                "업데이트 확인 중",
-                "updateCheckingButton",
-                enabled=False,
-                tooltip="GitHub Releases에서 최신 버전을 확인하고 있습니다",
-            )
+        self._set_update_button(
+            "업데이트 확인 중",
+            "updateCheckingButton",
+            enabled=False,
+            tooltip="GitHub Releases에서 최신 버전을 확인하고 있습니다",
+        )
 
         thread = UpdateCheckThread(
             UPDATE_MANIFEST_URL,
@@ -488,7 +498,12 @@ class MainWindow(QMainWindow):
         self._update_release = None
         self._update_installer_path = None
         self._update_error = None
-        self.update_status_button.hide()
+        self._set_update_button(
+            "업데이트 확인",
+            "updateCheckingButton",
+            enabled=True,
+            tooltip=f"현재 ToonOut {APP_VERSION}이 최신 버전입니다. 눌러서 다시 확인합니다",
+        )
 
     def _on_update_check_failed(self, error: str):
         self._update_error = error
@@ -585,7 +600,7 @@ class MainWindow(QMainWindow):
         elif self._update_release is not None:
             self._start_update_download()
         else:
-            self.check_for_updates(show_status=True)
+            self.check_for_updates()
 
     def install_ready_update(self):
         release = self._update_release
@@ -873,6 +888,7 @@ class MainWindow(QMainWindow):
             parent=self,
             allow_background=action == "install",
             cancellable=action == "install",
+            determinate=action == "install",
         )
         outcome: dict[str, object] = {"result": None}
         thread = GpuRuntimeFileThread(
@@ -896,6 +912,13 @@ class MainWindow(QMainWindow):
             dialog.set_status(message)
             self.acceleration_button.setToolTip(
                 f"{message}\n눌러서 설치 창을 다시 엽니다"
+            )
+
+        def handle_progress(status: str, percent: int):
+            dialog.set_progress(status, percent)
+            self.acceleration_button.setText(f"● GPU 팩 설치 · {percent}%")
+            self.acceleration_button.setToolTip(
+                f"[{status}] {percent}%\n눌러서 설치 창을 다시 엽니다"
             )
 
         def handle_installed(manifest):
@@ -922,6 +945,7 @@ class MainWindow(QMainWindow):
 
         dialog.cancel_requested.connect(self._cancel_gpu_runtime_operation)
         thread.status_changed.connect(handle_status)
+        thread.progress_changed.connect(handle_progress)
         thread.installed.connect(handle_installed)
         thread.deleted.connect(handle_deleted)
         thread.failed.connect(handle_failure)
@@ -1090,6 +1114,7 @@ class MainWindow(QMainWindow):
         process = ModelInstallProcess(directory, self)
         self._model_install_process = process
         process.status_changed.connect(self._on_model_install_status)
+        process.progress_changed.connect(self._on_model_install_progress)
         process.installation_succeeded.connect(self._on_model_install_succeeded)
         process.installation_failed.connect(self._on_model_install_failed)
         process.installation_cancelled.connect(self._on_model_install_cancelled)
@@ -1108,6 +1133,14 @@ class MainWindow(QMainWindow):
             self._model_install_dialog.set_status(message)
         self.model_status_button.setToolTip(
             f"{message}\n눌러서 설치 창을 다시 엽니다"
+        )
+
+    def _on_model_install_progress(self, status: str, percent: int):
+        if self._model_install_dialog is not None:
+            self._model_install_dialog.set_progress(status, percent)
+        self.model_status_button.setText(f"● 모델 설치 · {percent}%")
+        self.model_status_button.setToolTip(
+            f"[{status}] {percent}%\n눌러서 설치 창을 다시 엽니다"
         )
 
     def _finish_model_install_process(self):

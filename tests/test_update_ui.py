@@ -31,7 +31,7 @@ class UpdateUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_development_build_keeps_update_status_quiet(self):
+    def test_development_build_keeps_update_button_visible_but_disabled(self):
         with (
             patch.object(MainWindow, "_refresh_acceleration_status"),
             patch("main.UPDATE_PUBLIC_KEY_B64", ""),
@@ -40,8 +40,23 @@ class UpdateUiTests(unittest.TestCase):
 
             window.check_for_updates()
 
-            self.assertTrue(window.update_status_button.isHidden())
+            self.assertFalse(window.update_status_button.isHidden())
+            self.assertFalse(window.update_status_button.isEnabled())
+            self.assertEqual(window.update_status_button.text(), "업데이트 확인")
             self.assertIsNone(window._update_check_thread)
+            window.close()
+
+    def test_up_to_date_result_restores_manual_check_button(self):
+        with patch.object(MainWindow, "_refresh_acceleration_status"):
+            window = MainWindow()
+            window.update_status_button.hide()
+
+            window._on_update_up_to_date()
+
+            self.assertFalse(window.update_status_button.isHidden())
+            self.assertTrue(window.update_status_button.isEnabled())
+            self.assertEqual(window.update_status_button.text(), "업데이트 확인")
+            self.assertIn("최신 버전", window.update_status_button.toolTip())
             window.close()
 
     def test_available_release_starts_automatic_download(self):

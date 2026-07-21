@@ -210,7 +210,14 @@ def run_model_install_worker(model_directory: str, status_path: str) -> int:
             lambda message: emit("status", message=message),
         )
         engine = ToonOutEngine(model_directory)
-        engine.load(lambda message: emit("status", message=message))
+        engine.load(
+            lambda message: emit("status", message=message),
+            lambda status, percent: emit(
+                "progress",
+                status=status,
+                percent=percent,
+            ),
+        )
         emit("success")
         return 0
     except Exception as error:
@@ -222,6 +229,7 @@ class ModelInstallProcess(QProcess):
     """취소할 수 있는 별도 모델 설치 프로세스와 상태 파일을 관리한다."""
 
     status_changed = Signal(str)
+    progress_changed = Signal(str, int)
     installation_succeeded = Signal()
     installation_failed = Signal(str)
     installation_cancelled = Signal()
@@ -305,6 +313,11 @@ class ModelInstallProcess(QProcess):
             event = record.get("event")
             if event == "status":
                 self.status_changed.emit(str(record.get("message", "")))
+            elif event == "progress":
+                self.progress_changed.emit(
+                    str(record.get("status", "모델 설치 중")),
+                    max(0, min(100, int(record.get("percent", 0)))),
+                )
             elif event == "error":
                 self._last_error = str(
                     record.get("message", "모델을 설치하지 못했습니다.")
@@ -627,6 +640,7 @@ class ModelFileThread(QThread):
 
 class GpuRuntimeFileThread(QThread):
     status_changed = Signal(str)
+    progress_changed = Signal(str, int)
     installed = Signal(object)
     deleted = Signal()
     failed = Signal(str)
@@ -653,8 +667,9 @@ class GpuRuntimeFileThread(QThread):
                 manifest = install_gpu_runtime(
                     self._pack_path,
                     self._runtime_directory,
-                    self.status_changed.emit,
-                    self._cancel_event.is_set,
+                    report=self.status_changed.emit,
+                    should_cancel=self._cancel_event.is_set,
+                    report_progress=self.progress_changed.emit,
                 )
                 self.installed.emit(manifest)
                 return

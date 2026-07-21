@@ -5,12 +5,32 @@ import torch
 
 from inference import (
     ToonOutEngine,
+    _download_progress_class,
     prepare_model_for_device,
     verify_model_runtime_dependencies,
 )
 
 
 class InferenceModelDirectoryTests(unittest.TestCase):
+    def test_download_progress_maps_bytes_to_install_percent_range(self):
+        events = []
+        progress_class = _download_progress_class(
+            lambda status, percent: events.append((status, percent)),
+            "가중치 다운로드 중",
+            25,
+            85,
+        )
+        progress = progress_class(total=100)
+
+        progress.update(50)
+        progress.update(50)
+        progress.close()
+
+        self.assertEqual(
+            events,
+            [("가중치 다운로드 중", 55), ("가중치 다운로드 중", 85)],
+        )
+
     def test_required_remote_code_dependencies_are_available(self):
         verify_model_runtime_dependencies()
 

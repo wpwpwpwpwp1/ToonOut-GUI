@@ -533,6 +533,7 @@ class ModelInstallDialog(QDialog):
         self._allow_elevation = allow_elevation
         self._installing = False
         self._installed = False
+        self._progress: int | None = None
         self.setWindowTitle("ToonOut 모델 설치")
         self.setModal(True)
         self.setMinimumWidth(640)
@@ -579,8 +580,9 @@ class ModelInstallDialog(QDialog):
         card_layout.addWidget(self.space_label)
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setTextVisible(False)
+        self.progress_bar.setAccessibleName("모델 설치 진행률")
         self.progress_bar.hide()
         self.status_label = QLabel("설치를 시작하면 필요한 파일을 내려받습니다")
         self.status_label.setObjectName("mutedText")
@@ -662,7 +664,7 @@ class ModelInstallDialog(QDialog):
         self.progress_bar.show()
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
-        self.status_label.setText("모델 설치를 시작하는 중")
+        self.set_progress("설치 준비 중", 0)
         self.install_requested.emit(str(self._directory))
 
     def _handle_cancel_action(self):
@@ -694,7 +696,19 @@ class ModelInstallDialog(QDialog):
             self.elevation_requested.emit(str(self._directory))
 
     def set_status(self, text: str):
-        self.status_label.setText(text)
+        if self._progress is None:
+            self.status_label.setText(text)
+        else:
+            self.status_label.setText(f"[{text}] {self._progress}%")
+
+    def set_progress(self, status: str, percent: int):
+        self._progress = max(0, min(100, percent))
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(self._progress)
+        self.progress_bar.setAccessibleDescription(
+            f"{status}, {self._progress}%"
+        )
+        self.status_label.setText(f"[{status}] {self._progress}%")
 
     def show_failure(self, error: str):
         self._installing = False
@@ -703,6 +717,7 @@ class ModelInstallDialog(QDialog):
         self.cancel_button.setEnabled(True)
         self.install_button.setEnabled(True)
         self.progress_bar.hide()
+        self._progress = None
         self.status_label.setObjectName("errorText")
         self.status_label.setStyleSheet("")
         self.status_label.setText(error)
@@ -712,7 +727,7 @@ class ModelInstallDialog(QDialog):
         self.install_button.setEnabled(False)
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
-        self.status_label.setText("모델 설치를 취소하는 중")
+        self.set_status("모델 설치 취소 중")
 
     def show_cancelled(self):
         self._installing = False
@@ -721,6 +736,7 @@ class ModelInstallDialog(QDialog):
         self.cancel_button.setEnabled(True)
         self.install_button.setEnabled(True)
         self.progress_bar.hide()
+        self._progress = None
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
         self.status_label.setText(
@@ -733,11 +749,9 @@ class ModelInstallDialog(QDialog):
         self.state_label.setText("● 설치됨")
         self.state_label.setObjectName("modelInstalledLabel")
         self.state_label.setStyleSheet("")
-        self.progress_bar.setRange(0, 1)
-        self.progress_bar.setValue(1)
+        self.set_progress("모델 설치 완료", 100)
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
-        self.status_label.setText("모델 설치가 완료되었습니다")
         self.cancel_button.setText("닫기")
         self.install_button.setText("완료")
         self.install_button.setEnabled(True)
@@ -1076,10 +1090,12 @@ class ModelOperationDialog(QDialog):
         *,
         allow_background: bool = False,
         cancellable: bool = False,
+        determinate: bool = False,
     ):
         super().__init__(parent)
         self._running = True
         self._allow_background = allow_background
+        self._progress: int | None = 0 if determinate else None
         self.setWindowTitle(title)
         self.setModal(True)
         self.setMinimumWidth(520)
@@ -1093,8 +1109,14 @@ class ModelOperationDialog(QDialog):
         self.status_label.setObjectName("mutedText")
         self.status_label.setWordWrap(True)
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)
+        if determinate:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.status_label.setText(f"[{status}] 0%")
+        else:
+            self.progress_bar.setRange(0, 0)
         self.progress_bar.setTextVisible(False)
+        self.progress_bar.setAccessibleName("파일 작업 진행률")
         layout.addWidget(title_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_bar)
@@ -1125,7 +1147,19 @@ class ModelOperationDialog(QDialog):
         self.cancel_requested.emit()
 
     def set_status(self, status: str):
-        self.status_label.setText(status)
+        if self._progress is None:
+            self.status_label.setText(status)
+        else:
+            self.status_label.setText(f"[{status}] {self._progress}%")
+
+    def set_progress(self, status: str, percent: int):
+        self._progress = max(0, min(100, percent))
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(self._progress)
+        self.progress_bar.setAccessibleDescription(
+            f"{status}, {self._progress}%"
+        )
+        self.status_label.setText(f"[{status}] {self._progress}%")
 
     def finish(self):
         self._running = False
@@ -1138,6 +1172,7 @@ class ModelOperationDialog(QDialog):
     def show_cancelled(self):
         self._running = False
         self.progress_bar.hide()
+        self._progress = None
         self.status_label.setText("GPU 가속 팩 설치를 취소했습니다")
         if self.cancel_button is not None:
             self.cancel_button.hide()

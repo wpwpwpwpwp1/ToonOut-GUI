@@ -11,9 +11,60 @@ from app_settings import configure_huggingface_environment, default_model_direct
 
 BASE_MODEL_REPOSITORY = "ZhengPeng7/BiRefNet"
 BASE_MODEL_REVISION = "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4"
+BASE_MODEL_CODE_FILES = (
+    "config.json",
+    "birefnet.py",
+    "BiRefNet_config.py",
+)
 TOONOUT_REPOSITORY = "joelseytre/toonout"
 TOONOUT_REVISION = "cbf720eca394edcde66b861a8a8c20fbabe9c748"
 TOONOUT_WEIGHTS = "birefnet_finetuned_toonout.pth"
+
+
+def _download_progress_class(
+    report_progress: Callable[[str, int], None],
+    status: str,
+    start_percent: int,
+    end_percent: int,
+):
+    """Hugging Face의 바이트 진행률을 앱 설치 진행률 구간에 맞춘다."""
+
+    from tqdm.auto import tqdm
+
+    highest_percent = start_percent - 1
+
+    class DownloadProgress(tqdm):
+        def display(self, msg=None, pos=None) -> None:
+            # 별도 설치 프로세스의 콘솔 대신 GUI에만 진행률을 보낸다.
+            return None
+
+        def _report(self) -> None:
+            nonlocal highest_percent
+            total = int(self.total or 0)
+            if total <= 0:
+                return
+            fraction = min(1.0, max(0.0, float(self.n) / total))
+            percent = round(
+                start_percent + (end_percent - start_percent) * fraction
+            )
+            if percent <= highest_percent:
+                return
+            highest_percent = percent
+            report_progress(status, percent)
+
+        def update(self, n=1):
+            updated = super().update(n)
+            self._report()
+            return updated
+
+        def update_transfer(self, n=1) -> None:
+            # Xet 네트워크 전송량은 중복 압축 바이트일 수 있어 퍼센트에 더하지 않는다.
+            return None
+
+        def set_transfer_postfix_str(self, *args, **kwargs) -> None:
+            return None
+
+    return DownloadProgress
 
 
 def _existing_alpha(image):
@@ -130,7 +181,11 @@ class ToonOutEngine:
         self._model_directory = Path(directory)
         return True
 
-    def load(self, report_status: Callable[[str], None] | None = None) -> None:
+    def load(
+        self,
+        report_status: Callable[[str], None] | None = None,
+        report_progress: Callable[[str, int], None] | None = None,
+    ) -> None:
         if self.is_loaded:
             return
 
@@ -138,12 +193,17 @@ class ToonOutEngine:
             if report_status is not None:
                 report_status(message)
 
-        report("모델 저장 위치를 확인하는 중")
+        def progress(message: str, percent: int) -> None:
+            report(message)
+            if report_progress is not None:
+                report_progress(message, max(0, min(100, percent)))
+
+        progress("설치 준비 중", 0)
         self._model_directory.mkdir(parents=True, exist_ok=True)
         configure_huggingface_environment(self._model_directory)
         cache_directory = str(self._model_directory)
 
-        report("필요한 추론 라이브러리를 불러오는 중")
+        progress("추론 라이브러리 확인 중", 5)
 
         import torch
         import transformers.configuration_utils
@@ -165,7 +225,30 @@ class ToonOutEngine:
             config_class.__getattribute__ = patched_getattribute
             config_class._toonout_compatibility_patch = True
 
-        report("BiRefNet 모델 구조를 준비하는 중")
+        if report_progress is not None:
+            code_ranges = ((8, 12), (12, 16), (16, 20))
+            for filename, (start_percent, end_percent) in zip(
+                BASE_MODEL_CODE_FILES,
+                code_ranges,
+                strict=True,
+            ):
+                status = "모델 구성 파일 다운로드 중"
+                report_progress(status, start_percent)
+                hf_hub_download(
+                    repo_id=BASE_MODEL_REPOSITORY,
+                    filename=filename,
+                    revision=BASE_MODEL_REVISION,
+                    cache_dir=cache_directory,
+                    tqdm_class=_download_progress_class(
+                        report_progress,
+                        status,
+                        start_percent,
+                        end_percent,
+                    ),
+                )
+                report_progress(status, end_percent)
+
+        progress("BiRefNet 모델 구조 준비 중", 22)
         config = AutoConfig.from_pretrained(
             BASE_MODEL_REPOSITORY,
             revision=BASE_MODEL_REVISION,
@@ -179,13 +262,24 @@ class ToonOutEngine:
                 code_revision=BASE_MODEL_REVISION,
             )
 
-        report("ToonOut 가중치를 준비하는 중 · 처음에는 시간이 걸릴 수 있습니다")
+        progress("ToonOut 가중치 다운로드 중", 25)
         checkpoint_path = hf_hub_download(
             repo_id=TOONOUT_REPOSITORY,
             filename=TOONOUT_WEIGHTS,
             revision=TOONOUT_REVISION,
             cache_dir=cache_directory,
+            tqdm_class=(
+                _download_progress_class(
+                    report_progress,
+                    "ToonOut 가중치 다운로드 중",
+                    25,
+                    85,
+                )
+                if report_progress is not None
+                else None
+            ),
         )
+        progress("ToonOut 가중치 확인 중", 85)
 
         state_dict = torch.load(
             checkpoint_path,
@@ -204,8 +298,10 @@ class ToonOutEngine:
                 key = key[len("module."):]
             clean_state_dict[key] = value
 
+        progress("모델 가중치 적용 중", 92)
         model.load_state_dict(clean_state_dict, assign=True)
 
+        progress("처리 장치 준비 중", 96)
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._model, self._input_dtype = prepare_model_for_device(
             model,
@@ -221,7 +317,7 @@ class ToonOutEngine:
             ),
         ])
 
-        report(f"모델 준비 완료 · {self.device_label} 사용")
+        progress(f"모델 준비 완료 · {self.device_label} 사용", 100)
 
     def remove_background(self, source_path: str, output_path: str) -> None:
         if not self.is_loaded:

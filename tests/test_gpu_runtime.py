@@ -88,6 +88,28 @@ class GpuRuntimeTests(unittest.TestCase):
             delete_gpu_runtime(destination)
             self.assertFalse(destination.exists())
 
+    def test_install_reports_monotonic_percent_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "ToonOut-NVIDIA-GPU-Pack.zip"
+            destination = root / "runtime"
+            write_fake_pack(pack)
+            events = []
+
+            install_gpu_runtime(
+                pack,
+                destination,
+                report_progress=lambda status, percent: events.append(
+                    (status, percent)
+                ),
+            )
+
+            percentages = [percent for _status, percent in events]
+            self.assertEqual(percentages[0], 0)
+            self.assertEqual(percentages[-1], 100)
+            self.assertEqual(percentages, sorted(percentages))
+            self.assertIn("설치 완료", events[-1][0])
+
     def test_split_pack_is_verified_and_installed_without_reassembly(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -96,11 +118,22 @@ class GpuRuntimeTests(unittest.TestCase):
             write_fake_pack(pack)
             parts_manifest = split_pack(pack, part_size=40)
             pack.unlink()
+            events = []
 
-            manifest = install_gpu_runtime(parts_manifest, destination)
+            manifest = install_gpu_runtime(
+                parts_manifest,
+                destination,
+                report_progress=lambda status, percent: events.append(
+                    (status, percent)
+                ),
+            )
 
             self.assertEqual(manifest.worker_protocol, GPU_WORKER_PROTOCOL)
             self.assertTrue(gpu_runtime_is_installed(destination))
+            self.assertEqual(events[-1][1], 100)
+            self.assertTrue(
+                any("분할 GPU" in status and percent > 5 for status, percent in events)
+            )
             logical_size = sum(
                 path.stat().st_size
                 for path in destination.rglob("*")
