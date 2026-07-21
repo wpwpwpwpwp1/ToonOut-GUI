@@ -31,9 +31,11 @@ python scripts/generate_update_signing_key.py
 정식 공개 Windows 배포에는 신뢰된 Authenticode 코드 서명 인증서(PFX)가 필요하다.
 PFX 파일 전체를 Base64로 만든 `WINDOWS_CODESIGN_CERT_B64`와 인증서 암호인
 `WINDOWS_CODESIGN_PASSWORD`를 Secret으로 추가한다. 두 값이 있으면 앱 EXE와
-설치 프로그램을 서명·검증해 정식 Release로 게시한다. 두 값이 없으면 설치 파일은
-서명하지 않고 `unsigned beta` 사전 릴리스로 게시하며 Windows SmartScreen에서
-알 수 없는 게시자 경고가 나타날 수 있다.
+설치 프로그램을 서명·검증해 게시한다. 두 값이 없으면 설치 파일은 서명하지 않은
+정식 채널 Release로 게시한다. 이 경우에도 `update.json`은 Ed25519로 서명하지만,
+Windows SmartScreen에서 알 수 없는 게시자 경고가 나타날 수 있다. 자동 업데이트가
+조회하는 GitHub `releases/latest`는 사전 릴리스를 제외하므로, 설치된 앱에 전달할
+릴리스는 사전 릴리스로 만들지 않는다. 정식 채널 배포는 전체 테스트가 통과해야 한다.
 
 GitHub의 `Settings → Actions → General → Workflow permissions`에서
 `Read and write permissions`도 선택한다. Release 파일을 올리기 위해 필요하다.
@@ -132,7 +134,7 @@ git push origin v0.1.1
 ## Windows 게시자 서명
 
 Ed25519 서명은 ToonOut 앱이 업데이트 manifest의 진위를 검증하고, Authenticode는
-Windows가 게시자를 확인하는 별개의 보호 장치다. 인증서가 없는 사전 릴리스는
-테스트 사용자에게 Windows 경고와 실행 방법을 명확히 안내한다. 인증서 갱신 시
+Windows가 게시자를 확인하는 별개의 보호 장치다. 인증서가 없는 릴리스는 테스트
+사용자에게 Windows 경고와 실행 방법을 명확히 안내한다. 인증서 갱신 시
 Secret도 만료 전에 교체한다. 새 인증서의 평판이 쌓이기 전에는 SmartScreen 확인
 화면이 나타날 수 있다.

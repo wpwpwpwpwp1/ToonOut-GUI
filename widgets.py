@@ -520,6 +520,7 @@ class ModelInstallDialog(QDialog):
 
     install_requested = Signal(str)
     elevation_requested = Signal(str)
+    cancel_requested = Signal()
 
     def __init__(
         self,
@@ -603,7 +604,7 @@ class ModelInstallDialog(QDialog):
         layout.addLayout(button_row)
 
         self.browse_button.clicked.connect(self._browse)
-        self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.clicked.connect(self._handle_cancel_action)
         self.install_button.clicked.connect(self._handle_primary_action)
         self._refresh_space_label()
 
@@ -655,13 +656,20 @@ class ModelInstallDialog(QDialog):
 
         self._installing = True
         self.browse_button.setEnabled(False)
-        self.cancel_button.setEnabled(False)
+        self.cancel_button.setText("설치 취소")
+        self.cancel_button.setEnabled(True)
         self.install_button.setEnabled(False)
         self.progress_bar.show()
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
         self.status_label.setText("모델 설치를 시작하는 중")
         self.install_requested.emit(str(self._directory))
+
+    def _handle_cancel_action(self):
+        if self._installing:
+            self.cancel_requested.emit()
+            return
+        self.reject()
 
     def _offer_elevation(self, error: OSError):
         message = QMessageBox(self)
@@ -691,12 +699,33 @@ class ModelInstallDialog(QDialog):
     def show_failure(self, error: str):
         self._installing = False
         self.browse_button.setEnabled(True)
+        self.cancel_button.setText("취소")
         self.cancel_button.setEnabled(True)
         self.install_button.setEnabled(True)
         self.progress_bar.hide()
         self.status_label.setObjectName("errorText")
         self.status_label.setStyleSheet("")
         self.status_label.setText(error)
+
+    def show_cancelling(self):
+        self.cancel_button.setEnabled(False)
+        self.install_button.setEnabled(False)
+        self.status_label.setObjectName("mutedText")
+        self.status_label.setStyleSheet("")
+        self.status_label.setText("모델 설치를 취소하는 중")
+
+    def show_cancelled(self):
+        self._installing = False
+        self.browse_button.setEnabled(True)
+        self.cancel_button.setText("취소")
+        self.cancel_button.setEnabled(True)
+        self.install_button.setEnabled(True)
+        self.progress_bar.hide()
+        self.status_label.setObjectName("mutedText")
+        self.status_label.setStyleSheet("")
+        self.status_label.setText(
+            "모델 설치를 취소했습니다 · 내려받은 일부 파일은 다음 설치 때 재사용됩니다"
+        )
 
     def show_success(self):
         self._installing = False
@@ -709,13 +738,11 @@ class ModelInstallDialog(QDialog):
         self.status_label.setObjectName("mutedText")
         self.status_label.setStyleSheet("")
         self.status_label.setText("모델 설치가 완료되었습니다")
+        self.cancel_button.setText("닫기")
         self.install_button.setText("완료")
         self.install_button.setEnabled(True)
 
     def closeEvent(self, event):
-        if self._installing:
-            event.ignore()
-            return
         super().closeEvent(event)
 
 
@@ -1037,11 +1064,22 @@ class AccelerationDialog(QDialog):
 
 
 class ModelOperationDialog(QDialog):
-    """용량이 큰 모델 이동·삭제 중 앱이 멈춘 것처럼 보이지 않게 한다."""
+    """긴 파일 작업을 표시하고 선택적으로 백그라운드·취소를 지원한다."""
 
-    def __init__(self, title: str, status: str, parent: QWidget | None = None):
+    cancel_requested = Signal()
+
+    def __init__(
+        self,
+        title: str,
+        status: str,
+        parent: QWidget | None = None,
+        *,
+        allow_background: bool = False,
+        cancellable: bool = False,
+    ):
         super().__init__(parent)
         self._running = True
+        self._allow_background = allow_background
         self.setWindowTitle(title)
         self.setModal(True)
         self.setMinimumWidth(520)
@@ -1053,12 +1091,38 @@ class ModelOperationDialog(QDialog):
         title_label.setObjectName("dialogTitle")
         self.status_label = QLabel(status)
         self.status_label.setObjectName("mutedText")
+        self.status_label.setWordWrap(True)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setTextVisible(False)
         layout.addWidget(title_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_bar)
+
+        self.cancel_button: QPushButton | None = None
+        self.background_button: QPushButton | None = None
+        if cancellable or allow_background:
+            button_row = QHBoxLayout()
+            button_row.addStretch()
+            if cancellable:
+                self.cancel_button = QPushButton("설치 취소")
+                self.cancel_button.setObjectName("dangerButton")
+                self.cancel_button.clicked.connect(self._request_cancel)
+                button_row.addWidget(self.cancel_button)
+            if allow_background:
+                self.background_button = QPushButton("백그라운드에서 계속")
+                self.background_button.setObjectName("quietButton")
+                self.background_button.clicked.connect(self.reject)
+                button_row.addWidget(self.background_button)
+            layout.addLayout(button_row)
+
+    def _request_cancel(self):
+        if not self._running:
+            return
+        if self.cancel_button is not None:
+            self.cancel_button.setEnabled(False)
+        self.set_status("GPU 가속 팩 설치를 취소하는 중")
+        self.cancel_requested.emit()
 
     def set_status(self, status: str):
         self.status_label.setText(status)
@@ -1071,8 +1135,17 @@ class ModelOperationDialog(QDialog):
         self._running = False
         self.reject()
 
+    def show_cancelled(self):
+        self._running = False
+        self.progress_bar.hide()
+        self.status_label.setText("GPU 가속 팩 설치를 취소했습니다")
+        if self.cancel_button is not None:
+            self.cancel_button.hide()
+        if self.background_button is not None:
+            self.background_button.setText("닫기")
+
     def closeEvent(self, event):
-        if self._running:
+        if self._running and not self._allow_background:
             event.ignore()
             return
         super().closeEvent(event)

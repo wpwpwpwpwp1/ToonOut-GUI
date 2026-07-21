@@ -9,6 +9,7 @@ from gpu_runtime import (
     GPU_WORKER_PROTOCOL,
     GPU_RUNTIME_KIND,
     GPU_RUNTIME_SCHEMA,
+    GpuRuntimeCancelled,
     GpuRuntimeError,
     delete_gpu_runtime,
     find_adjacent_gpu_pack,
@@ -136,6 +137,32 @@ class GpuRuntimeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(GpuRuntimeError, "조각 1"):
                 install_gpu_runtime(parts_manifest, root / "runtime")
+
+    def test_cancelled_install_removes_staging_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "pack.zip"
+            destination = root / "runtime"
+            write_fake_pack(pack)
+            checks = 0
+
+            def should_cancel():
+                nonlocal checks
+                checks += 1
+                return checks >= 3
+
+            with self.assertRaises(GpuRuntimeCancelled):
+                install_gpu_runtime(
+                    pack,
+                    destination,
+                    should_cancel=should_cancel,
+                )
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(
+                list(root.glob(".nvidia-gpu-install-*")),
+                [],
+            )
 
     def test_modified_worker_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

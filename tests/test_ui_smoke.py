@@ -554,17 +554,61 @@ class UiSmokeTests(unittest.TestCase):
         )
         dialog.close()
 
-    def test_model_install_dialog_has_location_and_install_action(self):
+    def test_model_install_dialog_can_cancel_or_hide_during_installation(self):
         with tempfile.TemporaryDirectory() as directory:
             dialog = ModelInstallDialog(
                 directory,
                 allow_elevation=True,
             )
+            cancellations = []
+            dialog.cancel_requested.connect(lambda: cancellations.append(True))
+            dialog.show()
 
             self.assertEqual(dialog.path_field.text(), directory)
             self.assertEqual(dialog.install_button.text(), "모델 설치")
+            dialog.install_button.click()
+
+            self.assertEqual(dialog.cancel_button.text(), "설치 취소")
+            self.assertTrue(dialog.cancel_button.isEnabled())
+            dialog.cancel_button.click()
+            self.assertEqual(cancellations, [True])
 
             dialog.close()
+            self.app.processEvents()
+            self.assertFalse(dialog.isVisible())
+
+    def test_model_status_reopens_background_installation(self):
+        with (
+            patch("main.model_is_installed", return_value=False),
+            patch.object(MainWindow, "_refresh_acceleration_status"),
+        ):
+            window = MainWindow()
+            dialog = MagicMock()
+            dialog.exec.return_value = QDialog.DialogCode.Rejected
+            window._model_operation = "install"
+            window._model_install_dialog = dialog
+            window._refresh_model_status()
+
+            window.open_model_status()
+
+            self.assertEqual(window.model_status_button.text(), "● 모델 설치 중")
+            dialog.exec.assert_called_once_with()
+            window._model_operation = "idle"
+            window._model_install_dialog = None
+            window.close()
+
+    def test_acceleration_status_reopens_background_gpu_installation(self):
+        with patch.object(MainWindow, "_refresh_acceleration_status"):
+            window = MainWindow()
+            window._gpu_runtime_thread = MagicMock()
+            window._gpu_runtime_dialog = MagicMock()
+
+            window.open_acceleration_status()
+
+            window._gpu_runtime_dialog.exec.assert_called_once_with()
+            window._gpu_runtime_thread = None
+            window._gpu_runtime_dialog = None
+            window.close()
 
     def test_model_management_dialog_shows_installed_state(self):
         dialog = ModelManagementDialog("C:/ToonOut/models", "2.0 GB")

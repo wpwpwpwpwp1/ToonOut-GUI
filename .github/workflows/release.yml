@@ -66,7 +66,6 @@ jobs:
 
       - name: Run tests
         shell: pwsh
-        continue-on-error: ${{ env.TOONOUT_SIGNED_RELEASE != 'true' }}
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
@@ -141,7 +140,7 @@ jobs:
             --title "ToonOut $env:TOONOUT_VERSION" `
             --generate-notes
 
-      - name: Publish unsigned beta GitHub Release
+      - name: Publish unsigned GitHub Release
         if: env.TOONOUT_SIGNED_RELEASE != 'true'
         shell: pwsh
         env:
@@ -151,6 +150,5 @@ jobs:
             ".\dist\ToonOut-Setup-$env:TOONOUT_VERSION.exe" `
             ".\dist\update.json" `
             --verify-tag `
-            --title "ToonOut $env:TOONOUT_VERSION (unsigned beta)" `
-            --generate-notes `
-            --prerelease
+            --title "ToonOut $env:TOONOUT_VERSION (unsigned)" `
+            --generate-notes

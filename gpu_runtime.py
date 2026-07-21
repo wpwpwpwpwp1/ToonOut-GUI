@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -28,6 +29,10 @@ MAX_UNCOMPRESSED_BYTES = 16 * 1024**3
 
 
 class GpuRuntimeError(RuntimeError):
+    pass
+
+
+class GpuRuntimeCancelled(GpuRuntimeError):
     pass
 
 
@@ -153,10 +158,21 @@ def _safe_relative_path(value: str) -> Path:
     return Path(*pure_path.parts)
 
 
-def _sha256(path: Path) -> str:
+def _raise_if_cancelled(
+    should_cancel: Callable[[], bool] | None,
+) -> None:
+    if should_cancel is not None and should_cancel():
+        raise GpuRuntimeCancelled("GPU 가속 팩 설치를 취소했습니다.")
+
+
+def _sha256(
+    path: Path,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            _raise_if_cancelled(should_cancel)
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -165,6 +181,7 @@ def load_gpu_runtime_manifest(
     directory: str | Path,
     *,
     verify_files: bool = True,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> GpuRuntimeManifest:
     runtime_directory = Path(directory)
     manifest_path = runtime_directory / "manifest.json"
@@ -198,6 +215,7 @@ def load_gpu_runtime_manifest(
         return manifest
 
     for record in manifest.files:
+        _raise_if_cancelled(should_cancel)
         try:
             relative = _safe_relative_path(str(record["path"]))
             expected_size = int(record["size"])
@@ -208,7 +226,7 @@ def load_gpu_runtime_manifest(
         file_path = runtime_directory / relative
         if not file_path.is_file() or file_path.stat().st_size != expected_size:
             raise GpuRuntimeError(f"GPU 가속 팩 파일이 없거나 손상되었습니다: {relative}")
-        if _sha256(file_path) != expected_hash:
+        if _sha256(file_path, should_cancel) != expected_hash:
             raise GpuRuntimeError(f"GPU 가속 팩 파일 검증에 실패했습니다: {relative}")
 
     return manifest
@@ -329,10 +347,14 @@ def _load_split_pack(manifest_path: Path) -> _SplitPack:
     return _SplitPack(archive_size, archive_hash, tuple(pack_parts))
 
 
-def _verify_split_pack(pack: _SplitPack) -> None:
+def _verify_split_pack(
+    pack: _SplitPack,
+    should_cancel: Callable[[], bool] | None = None,
+) -> None:
     archive_digest = hashlib.sha256()
     total_size = 0
     for index, part in enumerate(pack.parts, start=1):
+        _raise_if_cancelled(should_cancel)
         if not part.path.is_file() or part.path.stat().st_size != part.size:
             raise GpuRuntimeError(
                 f"GPU 팩 조각 {index}이 없거나 크기가 다릅니다: {part.path.name}"
@@ -341,6 +363,7 @@ def _verify_split_pack(pack: _SplitPack) -> None:
         read_size = 0
         with part.path.open("rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                _raise_if_cancelled(should_cancel)
                 part_digest.update(chunk)
                 archive_digest.update(chunk)
                 read_size += len(chunk)
@@ -354,7 +377,10 @@ def _verify_split_pack(pack: _SplitPack) -> None:
         raise GpuRuntimeError("분할 GPU 가속 팩 전체 검증에 실패했습니다.")
 
 
-def _compress_runtime_directory(directory: Path) -> bool:
+def _compress_runtime_directory(
+    directory: Path,
+    should_cancel: Callable[[], bool] | None = None,
+) -> bool:
     """Windows가 지원하면 실행 가능한 파일을 LZX로 투명 압축한다."""
     if os.name != "nt":
         return False
@@ -363,23 +389,37 @@ def _compress_runtime_directory(directory: Path) -> bool:
         return False
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [compact, "/C", "/S", "/I", "/Q", "/EXE:LZX", "*"],
             cwd=directory,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            check=False,
             creationflags=creation_flags,
         )
+        while process.poll() is None:
+            if should_cancel is not None and should_cancel():
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise GpuRuntimeCancelled(
+                    "GPU 가속 팩 설치를 취소했습니다."
+                )
+            time.sleep(0.1)
+    except GpuRuntimeCancelled:
+        raise
     except OSError:
         return False
-    return result.returncode == 0
+    return process.returncode == 0
 
 
 def install_gpu_runtime(
     pack_path: str | Path,
     destination: str | Path | None = None,
     report: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> GpuRuntimeManifest:
     pack = Path(pack_path)
     runtime_directory = Path(destination or default_gpu_runtime_directory())
@@ -387,6 +427,7 @@ def install_gpu_runtime(
     runtime_root.mkdir(parents=True, exist_ok=True)
 
     def update(message: str):
+        _raise_if_cancelled(should_cancel)
         if report is not None:
             report(message)
 
@@ -400,7 +441,7 @@ def install_gpu_runtime(
         if pack.name.endswith(".parts.json"):
             update("분할 GPU 가속 팩을 검증하는 중")
             split_pack = _load_split_pack(pack)
-            _verify_split_pack(split_pack)
+            _verify_split_pack(split_pack, should_cancel)
             split_reader = _SplitPackReader(split_pack)
             archive_source = split_reader
         else:
@@ -428,10 +469,15 @@ def install_gpu_runtime(
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                    while chunk := source.read(1024 * 1024):
+                        _raise_if_cancelled(should_cancel)
+                        output.write(chunk)
 
         update("설치된 GPU 가속 파일을 검증하는 중")
-        manifest = load_gpu_runtime_manifest(staging_directory)
+        manifest = load_gpu_runtime_manifest(
+            staging_directory,
+            should_cancel=should_cancel,
+        )
         if not gpu_runtime_is_compatible(manifest):
             raise GpuRuntimeError(
                 "이 GPU 가속 팩은 현재 ToonOut과 호환되지 않습니다. "
@@ -439,8 +485,9 @@ def install_gpu_runtime(
             )
 
         update("GPU 가속 팩의 디스크 사용량을 줄이는 중")
-        if not _compress_runtime_directory(staging_directory):
+        if not _compress_runtime_directory(staging_directory, should_cancel):
             update("디스크 압축을 지원하지 않아 일반 방식으로 설치합니다")
+        _raise_if_cancelled(should_cancel)
 
         if runtime_directory.exists():
             backup_directory = runtime_root / (
@@ -453,8 +500,13 @@ def install_gpu_runtime(
         staging_directory = runtime_directory
         if backup_directory is not None:
             shutil.rmtree(backup_directory, ignore_errors=True)
-        update("GPU 가속 팩 설치가 완료되었습니다")
+        if report is not None:
+            report("GPU 가속 팩 설치가 완료되었습니다")
         return load_gpu_runtime_manifest(runtime_directory, verify_files=False)
+    except GpuRuntimeCancelled:
+        if backup_directory is not None and not runtime_directory.exists():
+            backup_directory.replace(runtime_directory)
+        raise
     except (OSError, zipfile.BadZipFile) as error:
         if backup_directory is not None and not runtime_directory.exists():
             backup_directory.replace(runtime_directory)

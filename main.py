@@ -98,6 +98,8 @@ from processing import (
     GpuRuntimeFileThread,
     InferenceThread,
     ModelFileThread,
+    ModelInstallProcess,
+    run_model_install_worker,
 )
 from styles import APP_STYLESHEET
 from update_config import UPDATE_PUBLIC_KEY_B64
@@ -177,6 +179,7 @@ class MainWindow(QMainWindow):
             or default_model_directory()
         )
         self._model_install_dialog: ModelInstallDialog | None = None
+        self._model_install_process: ModelInstallProcess | None = None
         self._model_operation = "idle"
         self._model_file_thread: ModelFileThread | None = None
         self._gpu_runtime_directory = default_gpu_runtime_directory()
@@ -187,6 +190,8 @@ class MainWindow(QMainWindow):
         self._acceleration_error: str | None = None
         self._acceleration_thread: AccelerationDetectionThread | None = None
         self._gpu_runtime_thread: GpuRuntimeFileThread | None = None
+        self._gpu_runtime_dialog: ModelOperationDialog | None = None
+        self._gpu_runtime_action: str | None = None
         self._update_check_thread: UpdateCheckThread | None = None
         self._update_download_thread: UpdateDownloadThread | None = None
         self._update_release: UpdateRelease | None = None
@@ -734,7 +739,11 @@ class MainWindow(QMainWindow):
         self._repolish_control(self.acceleration_button)
 
     def open_acceleration_status(self):
-        if self._processing or self._gpu_runtime_thread is not None:
+        if self._processing:
+            return
+        if self._gpu_runtime_thread is not None:
+            if self._gpu_runtime_dialog is not None:
+                self._gpu_runtime_dialog.exec()
             return
         if self._acceleration_info is None:
             QMessageBox.warning(
@@ -850,47 +859,112 @@ class MainWindow(QMainWindow):
         action: str,
         pack_path: str | None = None,
     ):
+        if self._gpu_runtime_thread is not None:
+            return
         title = "GPU 가속 팩 설치" if action == "install" else "GPU 가속 팩 삭제"
         status = (
             "가속 팩의 무결성을 확인하는 중"
             if action == "install"
             else "GPU 가속 파일을 삭제하는 중"
         )
-        dialog = ModelOperationDialog(title, status, parent=self)
-        outcome: dict[str, object] = {"success": False}
+        dialog = ModelOperationDialog(
+            title,
+            status,
+            parent=self,
+            allow_background=action == "install",
+            cancellable=action == "install",
+        )
+        outcome: dict[str, object] = {"result": None}
         thread = GpuRuntimeFileThread(
             action,
             str(self._gpu_runtime_directory),
             pack_path,
         )
         self._gpu_runtime_thread = thread
+        self._gpu_runtime_dialog = dialog
+        self._gpu_runtime_action = action
+        self.acceleration_button.setText("● GPU 팩 설치 중")
+        self.acceleration_button.setObjectName("accelerationCheckingButton")
+        self.acceleration_button.setToolTip(
+            "눌러서 백그라운드 GPU 가속 팩 설치 현황을 봅니다"
+        )
+        self.acceleration_button.setEnabled(True)
+        self._repolish_control(self.acceleration_button)
+        self._update_action_state()
+
+        def handle_status(message: str):
+            dialog.set_status(message)
+            self.acceleration_button.setToolTip(
+                f"{message}\n눌러서 설치 창을 다시 엽니다"
+            )
 
         def handle_installed(manifest):
             if not gpu_runtime_is_compatible(manifest):
+                outcome["result"] = "failure"
                 outcome["error"] = "최신 GPU 가속 팩이 필요합니다."
                 dialog.fail()
                 return
-            outcome["success"] = True
+            outcome["result"] = "success"
             dialog.finish()
 
         def handle_deleted():
-            outcome["success"] = True
+            outcome["result"] = "success"
             dialog.finish()
 
         def handle_failure(error: str):
+            outcome["result"] = "failure"
             outcome["error"] = error
             dialog.fail()
 
-        thread.status_changed.connect(dialog.set_status)
+        def handle_cancelled():
+            outcome["result"] = "cancelled"
+            dialog.show_cancelled()
+
+        dialog.cancel_requested.connect(self._cancel_gpu_runtime_operation)
+        thread.status_changed.connect(handle_status)
         thread.installed.connect(handle_installed)
         thread.deleted.connect(handle_deleted)
         thread.failed.connect(handle_failure)
+        thread.cancelled.connect(handle_cancelled)
+        thread.finished.connect(
+            lambda: self._finish_gpu_runtime_operation(
+                thread,
+                dialog,
+                action,
+                title,
+                outcome,
+            )
+        )
         thread.start()
         dialog.exec()
-        thread.wait()
-        self._gpu_runtime_thread = None
 
-        if outcome["success"]:
+    def _cancel_gpu_runtime_operation(self):
+        thread = self._gpu_runtime_thread
+        if thread is None or self._gpu_runtime_action != "install":
+            return
+        if self._gpu_runtime_dialog is not None:
+            self._gpu_runtime_dialog.set_status(
+                "GPU 가속 팩 설치를 취소하고 임시 파일을 정리하는 중"
+            )
+        thread.request_cancel()
+
+    def _finish_gpu_runtime_operation(
+        self,
+        thread: GpuRuntimeFileThread,
+        dialog: ModelOperationDialog,
+        action: str,
+        title: str,
+        outcome: dict[str, object],
+    ):
+        if self._gpu_runtime_thread is not thread:
+            return
+        self._gpu_runtime_thread = None
+        self._gpu_runtime_dialog = None
+        self._gpu_runtime_action = None
+        result = outcome.get("result")
+        self._update_action_state()
+
+        if result == "success":
             if action == "install":
                 self._replace_inference_worker(True)
                 message = "GPU 가속 팩을 설치했습니다. 다음 작업부터 GPU를 사용합니다."
@@ -899,15 +973,26 @@ class MainWindow(QMainWindow):
             self._acceleration_info = None
             self._refresh_acceleration_status()
             QMessageBox.information(self, f"{title} 완료", message)
-            return
+        elif result == "cancelled":
+            self._acceleration_info = None
+            self._refresh_acceleration_status()
+            self.status_label.setText("GPU 가속 팩 설치를 취소했습니다")
+        else:
+            self._acceleration_info = None
+            self._refresh_acceleration_status()
+            QMessageBox.warning(
+                self,
+                f"{title} 실패",
+                str(outcome.get("error", "GPU 가속 팩 작업을 완료하지 못했습니다.")),
+            )
 
-        self._acceleration_info = None
-        self._refresh_acceleration_status()
-        QMessageBox.warning(
-            self,
-            f"{title} 실패",
-            str(outcome.get("error", "GPU 가속 팩 작업을 완료하지 못했습니다.")),
-        )
+        if dialog.isVisible():
+            dialog.finished.connect(dialog.deleteLater)
+        else:
+            dialog.deleteLater()
+        thread.deleteLater()
+        if self._close_after_worker:
+            self.close()
 
     def _save_model_directory(self, directory: str | Path):
         self._model_directory = Path(directory)
@@ -918,15 +1003,28 @@ class MainWindow(QMainWindow):
         self._settings.sync()
 
     def _refresh_model_status(self):
-        if self._model_operation != "idle":
+        if self._model_operation == "install":
+            self.model_status_button.setText("● 모델 설치 중")
+            self.model_status_button.setObjectName("modelBusyButton")
+            self.model_status_button.setToolTip(
+                "눌러서 백그라운드 모델 설치 현황을 봅니다"
+            )
+        elif self._model_operation != "idle":
             self.model_status_button.setText("● 모델 작업 중")
             self.model_status_button.setObjectName("modelBusyButton")
+            self.model_status_button.setToolTip("모델 파일 작업이 진행 중입니다")
         elif model_is_installed(self._model_directory):
             self.model_status_button.setText("● 모델 설치됨")
             self.model_status_button.setObjectName("modelInstalledButton")
+            self.model_status_button.setToolTip(
+                "모델 설치 상태와 저장 위치를 확인합니다"
+            )
         else:
             self.model_status_button.setText("● 모델 설치 필요")
             self.model_status_button.setObjectName("modelRequiredButton")
+            self.model_status_button.setToolTip(
+                "모델 설치 상태와 저장 위치를 확인합니다"
+            )
 
         style = self.model_status_button.style()
         style.unpolish(self.model_status_button)
@@ -934,7 +1032,12 @@ class MainWindow(QMainWindow):
         self.model_status_button.update()
 
     def open_model_status(self):
-        if self._processing or self._model_operation != "idle":
+        if self._processing:
+            return
+        if self._model_operation == "install":
+            self.show_model_installer()
+            return
+        if self._model_operation != "idle":
             return
         if model_is_installed(self._model_directory):
             self._show_model_management()
@@ -942,32 +1045,113 @@ class MainWindow(QMainWindow):
             self.show_model_installer()
 
     def show_model_installer(self) -> bool:
-        if self._worker.isRunning() or self._model_operation != "idle":
+        if self._worker.isRunning():
             return False
 
-        dialog = ModelInstallDialog(
-            self._model_directory,
-            allow_elevation=not is_running_as_admin(),
-            parent=self,
-        )
-        dialog.install_requested.connect(self._begin_model_install)
-        dialog.elevation_requested.connect(self._restart_as_admin)
-        self._model_install_dialog = dialog
+        dialog = self._model_install_dialog
+        if self._model_operation == "install":
+            if dialog is None:
+                return False
+        elif self._model_operation != "idle":
+            return False
+        else:
+            dialog = ModelInstallDialog(
+                self._model_directory,
+                allow_elevation=not is_running_as_admin(),
+                parent=self,
+            )
+            dialog.install_requested.connect(self._begin_model_install)
+            dialog.cancel_requested.connect(self._cancel_model_install)
+            dialog.elevation_requested.connect(self._restart_as_admin)
+            self._model_install_dialog = dialog
+
         result = dialog.exec()
-        self._model_install_dialog = None
+        installed = model_is_installed(self._model_directory)
+        if self._model_operation != "install":
+            self._release_model_install_dialog(dialog)
         self._refresh_model_status()
-        return (
-            result == ModelInstallDialog.DialogCode.Accepted
-            and model_is_installed(self._model_directory)
-        )
+        return result == ModelInstallDialog.DialogCode.Accepted and installed
+
+    def _release_model_install_dialog(self, dialog: ModelInstallDialog):
+        if self._model_install_dialog is dialog:
+            self._model_install_dialog = None
+            dialog.deleteLater()
 
     def _begin_model_install(self, directory: str):
+        if self._model_install_process is not None:
+            return
         self._save_model_directory(directory)
         self._worker.reset_engine(directory)
         self._worker.set_jobs([])
         self._model_operation = "install"
         self._refresh_model_status()
-        self._worker.start()
+        self._update_action_state()
+
+        process = ModelInstallProcess(directory, self)
+        self._model_install_process = process
+        process.status_changed.connect(self._on_model_install_status)
+        process.installation_succeeded.connect(self._on_model_install_succeeded)
+        process.installation_failed.connect(self._on_model_install_failed)
+        process.installation_cancelled.connect(self._on_model_install_cancelled)
+        process.start_installation()
+
+    def _cancel_model_install(self):
+        process = self._model_install_process
+        if process is None:
+            return
+        if self._model_install_dialog is not None:
+            self._model_install_dialog.show_cancelling()
+        process.request_cancel()
+
+    def _on_model_install_status(self, message: str):
+        if self._model_install_dialog is not None:
+            self._model_install_dialog.set_status(message)
+        self.model_status_button.setToolTip(
+            f"{message}\n눌러서 설치 창을 다시 엽니다"
+        )
+
+    def _finish_model_install_process(self):
+        process = self._model_install_process
+        self._model_install_process = None
+        self._model_operation = "idle"
+        self._worker.reset_engine(str(self._model_directory))
+        self._refresh_model_status()
+        self._update_action_state()
+        if process is not None:
+            process.deleteLater()
+
+    def _on_model_install_succeeded(self):
+        dialog = self._model_install_dialog
+        self._finish_model_install_process()
+        if dialog is not None:
+            dialog.show_success()
+            if not dialog.isVisible():
+                self._release_model_install_dialog(dialog)
+        if self._close_after_worker:
+            self.close()
+
+    def _on_model_install_failed(self, error: str):
+        dialog = self._model_install_dialog
+        self._finish_model_install_process()
+        if dialog is not None:
+            dialog.show_failure(error)
+            if not dialog.isVisible():
+                self._release_model_install_dialog(dialog)
+        else:
+            QMessageBox.warning(self, "모델 설치 실패", error)
+        if self._close_after_worker:
+            self.close()
+
+    def _on_model_install_cancelled(self):
+        dialog = self._model_install_dialog
+        self._finish_model_install_process()
+        if dialog is not None:
+            dialog.show_cancelled()
+            if not dialog.isVisible():
+                self._release_model_install_dialog(dialog)
+        self.status_label.setText("모델 설치를 취소했습니다")
+        if self._close_after_worker:
+            self.close()
 
     def _restart_as_admin(self, directory: str):
         self._save_model_directory(directory)
@@ -2303,7 +2487,13 @@ class MainWindow(QMainWindow):
             for item in self._items
         )
 
-        if self._processing:
+        if self._gpu_runtime_thread is not None:
+            self.primary_button.setText("GPU 팩 설치 중")
+            self.primary_button.setEnabled(False)
+        elif self._model_operation == "install":
+            self.primary_button.setText("모델 설치 중")
+            self.primary_button.setEnabled(False)
+        elif self._processing:
             self.primary_button.setText("처리 중")
             self.primary_button.setEnabled(False)
         elif queued_count:
@@ -2356,11 +2546,23 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self._gpu_runtime_thread is not None and self._gpu_runtime_thread.isRunning():
-            QMessageBox.information(
-                self,
-                "GPU 가속 팩 작업 중",
-                "GPU 가속 팩 설치 또는 삭제가 끝난 뒤 종료할 수 있습니다.",
-            )
+            if self._gpu_runtime_action == "install":
+                choice = QMessageBox.question(
+                    self,
+                    "GPU 가속 팩 설치 중",
+                    "GPU 가속 팩 설치를 취소하고 ToonOut을 종료할까요?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if choice == QMessageBox.StandardButton.Yes:
+                    self._close_after_worker = True
+                    self._cancel_gpu_runtime_operation()
+            else:
+                QMessageBox.information(
+                    self,
+                    "GPU 가속 팩 작업 중",
+                    "GPU 가속 팩 삭제가 끝난 뒤 종료할 수 있습니다.",
+                )
             event.ignore()
             return
 
@@ -2370,6 +2572,24 @@ class MainWindow(QMainWindow):
                 "모델 파일 작업 중",
                 "모델 파일 이동 또는 삭제가 끝난 뒤 종료할 수 있습니다.",
             )
+            event.ignore()
+            return
+
+        if (
+            self._model_install_process is not None
+            and self._model_install_process.state()
+            != QProcess.ProcessState.NotRunning
+        ):
+            choice = QMessageBox.question(
+                self,
+                "모델 설치 중",
+                "모델 설치를 취소하고 ToonOut을 종료할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if choice == QMessageBox.StandardButton.Yes:
+                self._close_after_worker = True
+                self._cancel_model_install()
             event.ignore()
             return
 
@@ -2424,6 +2644,8 @@ class MainWindow(QMainWindow):
 def parse_app_arguments(arguments: list[str]):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--model-directory")
+    parser.add_argument("--model-install-worker")
+    parser.add_argument("--model-install-status")
     parser.add_argument("--open-model-installer", action="store_true")
     parser.add_argument("--restore-image", action="append", default=[])
     return parser.parse_known_args(arguments)
@@ -2431,6 +2653,15 @@ def parse_app_arguments(arguments: list[str]):
 
 if __name__ == "__main__":
     app_arguments, qt_arguments = parse_app_arguments(sys.argv[1:])
+    if app_arguments.model_install_worker:
+        if not app_arguments.model_install_status:
+            raise SystemExit(2)
+        raise SystemExit(
+            run_model_install_worker(
+                app_arguments.model_install_worker,
+                app_arguments.model_install_status,
+            )
+        )
     app = QApplication([sys.argv[0], *qt_arguments])
     app.setStyle("Fusion")
     app_icon = QIcon(str(application_icon_path()))

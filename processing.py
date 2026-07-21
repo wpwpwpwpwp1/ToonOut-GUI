@@ -10,17 +10,22 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QProcess, QThread, QTimer, Signal
 
 from acceleration import detect_acceleration
 from gpu_runtime import (
+    GpuRuntimeCancelled,
     delete_gpu_runtime,
     gpu_runtime_size,
     install_gpu_runtime,
     load_gpu_runtime_manifest,
 )
 from inference import ToonOutEngine
-from model_installation import delete_model_files, move_model_files
+from model_installation import (
+    delete_model_files,
+    model_is_installed,
+    move_model_files,
+)
 from performance import (
     PerformanceMode,
     PerformancePolicy,
@@ -182,6 +187,163 @@ class InferenceThread(QThread):
             last_completed_at = time.monotonic()
 
         self.batch_finished.emit(self._cancel_event.is_set())
+
+
+def run_model_install_worker(model_directory: str, status_path: str) -> int:
+    """별도 프로세스에서 모델을 설치하고 JSON-lines 상태만 부모에 남긴다."""
+
+    destination = Path(status_path)
+
+    def emit(event: str, **payload) -> None:
+        record = json.dumps(
+            {"event": event, **payload},
+            ensure_ascii=False,
+        )
+        with destination.open("a", encoding="utf-8") as status_file:
+            status_file.write(f"{record}\n")
+            status_file.flush()
+
+    try:
+        engine = ToonOutEngine(model_directory)
+        engine.load(lambda message: emit("status", message=message))
+        emit("success")
+        return 0
+    except Exception as error:
+        emit("error", message=InferenceThread.friendly_error(error))
+        return 1
+
+
+class ModelInstallProcess(QProcess):
+    """취소할 수 있는 별도 모델 설치 프로세스와 상태 파일을 관리한다."""
+
+    status_changed = Signal(str)
+    installation_succeeded = Signal()
+    installation_failed = Signal(str)
+    installation_cancelled = Signal()
+
+    def __init__(self, model_directory: str, parent=None):
+        super().__init__(parent)
+        self._model_directory = model_directory
+        descriptor, status_path = tempfile.mkstemp(
+            prefix="toonout-model-install-",
+            suffix=".jsonl",
+        )
+        os.close(descriptor)
+        self._status_path = Path(status_path)
+        self._status_offset = 0
+        self._status_buffer = ""
+        self._last_error: str | None = None
+        self._cancel_requested = False
+        self._settled = False
+
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(200)
+        self._status_timer.timeout.connect(self._read_status)
+        self.finished.connect(self._on_finished)
+        self.errorOccurred.connect(self._on_process_error)
+
+    def start_installation(self) -> None:
+        worker_arguments = [
+            "--model-install-worker",
+            self._model_directory,
+            "--model-install-status",
+            str(self._status_path),
+        ]
+        if getattr(sys, "frozen", False):
+            program = sys.executable
+            arguments = worker_arguments
+        else:
+            program = sys.executable
+            arguments = [
+                str(Path(__file__).with_name("main.py").resolve()),
+                *worker_arguments,
+            ]
+        self.setProgram(program)
+        self.setArguments(arguments)
+        self._status_timer.start()
+        self.start()
+
+    def request_cancel(self) -> None:
+        if self.state() == QProcess.ProcessState.NotRunning:
+            return
+        self._cancel_requested = True
+        self.status_changed.emit("모델 설치를 취소하는 중")
+        self.terminate()
+        QTimer.singleShot(2_000, self._kill_if_running)
+
+    def _kill_if_running(self) -> None:
+        if self.state() != QProcess.ProcessState.NotRunning:
+            self.kill()
+
+    def _read_status(self, final: bool = False) -> None:
+        try:
+            with self._status_path.open("rb") as status_file:
+                status_file.seek(self._status_offset)
+                chunk = status_file.read()
+                self._status_offset = status_file.tell()
+        except OSError:
+            return
+        if chunk:
+            self._status_buffer += chunk.decode("utf-8", errors="replace")
+        lines = self._status_buffer.split("\n")
+        self._status_buffer = lines.pop()
+        if final and self._status_buffer:
+            lines.append(self._status_buffer)
+            self._status_buffer = ""
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event = record.get("event")
+            if event == "status":
+                self.status_changed.emit(str(record.get("message", "")))
+            elif event == "error":
+                self._last_error = str(
+                    record.get("message", "모델을 설치하지 못했습니다.")
+                )
+
+    def _on_process_error(self, error) -> None:
+        if (
+            error == QProcess.ProcessError.FailedToStart
+            and not self._cancel_requested
+        ):
+            self._settle_failure("모델 설치 작업을 시작하지 못했습니다.")
+
+    def _on_finished(self, exit_code: int, _exit_status) -> None:
+        if self._settled:
+            return
+        self._status_timer.stop()
+        self._read_status(final=True)
+        if self._cancel_requested:
+            self._settled = True
+            self.installation_cancelled.emit()
+            self._remove_status_file()
+            return
+        if exit_code == 0 and model_is_installed(self._model_directory):
+            self._settled = True
+            self.installation_succeeded.emit()
+            self._remove_status_file()
+            return
+        self._settle_failure(
+            self._last_error or "모델 설치를 완료하지 못했습니다. 다시 시도하세요."
+        )
+
+    def _settle_failure(self, message: str) -> None:
+        if self._settled:
+            return
+        self._settled = True
+        self._status_timer.stop()
+        self.installation_failed.emit(message)
+        self._remove_status_file()
+
+    def _remove_status_file(self) -> None:
+        try:
+            self._status_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class ExternalInferenceThread(QThread):
@@ -463,6 +625,7 @@ class GpuRuntimeFileThread(QThread):
     installed = Signal(object)
     deleted = Signal()
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(
         self,
@@ -474,6 +637,10 @@ class GpuRuntimeFileThread(QThread):
         self._action = action
         self._runtime_directory = runtime_directory
         self._pack_path = pack_path
+        self._cancel_event = threading.Event()
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
 
     def run(self):
         try:
@@ -482,6 +649,7 @@ class GpuRuntimeFileThread(QThread):
                     self._pack_path,
                     self._runtime_directory,
                     self.status_changed.emit,
+                    self._cancel_event.is_set,
                 )
                 self.installed.emit(manifest)
                 return
@@ -491,6 +659,8 @@ class GpuRuntimeFileThread(QThread):
                 self.deleted.emit()
                 return
             raise ValueError("지원하지 않는 GPU 가속 팩 작업입니다.")
+        except GpuRuntimeCancelled:
+            self.cancelled.emit()
         except Exception as error:
             self.failed.emit(InferenceThread.friendly_error(error))
 
