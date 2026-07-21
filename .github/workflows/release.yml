@@ -58,7 +58,7 @@ jobs:
             Write-Output "Authenticode configuration found; publishing a signed release."
           } else {
             "TOONOUT_SIGNED_RELEASE=false" | Out-File -FilePath $env:GITHUB_ENV -Append
-            Write-Warning "Authenticode configuration is missing; publishing an unsigned prerelease."
+            Write-Warning "Authenticode configuration is missing; publishing an unsigned release."
           }
 
       - name: Install Python dependencies

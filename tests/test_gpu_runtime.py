@@ -67,7 +67,7 @@ class GpuRuntimeTests(unittest.TestCase):
             pack = root / "ToonOut-NVIDIA-GPU-Pack.zip"
             pack.touch()
 
-            self.assertEqual(find_adjacent_gpu_pack(root), pack)
+            self.assertEqual(find_adjacent_gpu_pack(root), pack.resolve())
 
     def test_pack_is_verified_installed_and_removed(self):
         with tempfile.TemporaryDirectory() as directory:

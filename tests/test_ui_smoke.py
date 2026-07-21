@@ -456,7 +456,9 @@ class UiSmokeTests(unittest.TestCase):
             self.assertTrue(handled)
             self.assertTrue(event.accepted)
             self.assertEqual(len(window._items), 1)
-            self.assertEqual(window._items[0].source_path, str(image_path))
+            self.assertEqual(
+                Path(window._items[0].source_path).resolve(), image_path.resolve()
+            )
             self.assertIn("현재 작업 후", window.status_label.text())
             window._processing = False
             window.close()
