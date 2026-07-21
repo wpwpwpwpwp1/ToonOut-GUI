@@ -11,6 +11,7 @@ from app_settings import configure_huggingface_environment, default_model_direct
 
 BASE_MODEL_REPOSITORY = "ZhengPeng7/BiRefNet"
 BASE_MODEL_REVISION = "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4"
+BASE_MODEL_CONFIG_CLASS = "BiRefNet_config.BiRefNetConfig"
 BASE_MODEL_CODE_FILES = (
     "config.json",
     "birefnet.py",
@@ -65,6 +66,25 @@ def _download_progress_class(
             return None
 
     return DownloadProgress
+
+
+def _load_birefnet_config(cache_directory: str):
+    """고정된 BiRefNet 구성 클래스를 직접 불러와 AutoConfig 판별을 피한다."""
+
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+    config_class = get_class_from_dynamic_module(
+        BASE_MODEL_CONFIG_CLASS,
+        BASE_MODEL_REPOSITORY,
+        revision=BASE_MODEL_REVISION,
+        code_revision=BASE_MODEL_REVISION,
+        cache_dir=cache_directory,
+    )
+    return config_class.from_pretrained(
+        BASE_MODEL_REPOSITORY,
+        revision=BASE_MODEL_REVISION,
+        cache_dir=cache_directory,
+    )
 
 
 def _existing_alpha(image):
@@ -209,7 +229,7 @@ class ToonOutEngine:
         import transformers.configuration_utils
         from huggingface_hub import hf_hub_download
         from torchvision import transforms
-        from transformers import AutoConfig, AutoModelForImageSegmentation
+        from transformers import AutoModelForImageSegmentation
 
         verify_model_runtime_dependencies()
 
@@ -249,12 +269,7 @@ class ToonOutEngine:
                 report_progress(status, end_percent)
 
         progress("BiRefNet 모델 구조 준비 중", 22)
-        config = AutoConfig.from_pretrained(
-            BASE_MODEL_REPOSITORY,
-            revision=BASE_MODEL_REVISION,
-            trust_remote_code=True,
-            cache_dir=cache_directory,
-        )
+        config = _load_birefnet_config(cache_directory)
         with torch.device("meta"):
             model = AutoModelForImageSegmentation.from_config(
                 config,
