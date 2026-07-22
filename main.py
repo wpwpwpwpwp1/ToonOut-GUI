@@ -72,6 +72,7 @@ from app_version import APP_VERSION, UPDATE_MANIFEST_URL
 from acceleration import AccelerationInfo, AccelerationMode
 from gpu_download import GpuPackRelease, current_gpu_pack_release
 from gpu_runtime import (
+    GPU_RUNTIME_DIRECTORY_SETTING,
     GPU_RUNTIME_SETTING,
     default_gpu_runtime_directory,
     gpu_runtime_is_compatible,
@@ -234,7 +235,12 @@ class MainWindow(QMainWindow):
         self._model_install_process: ModelInstallProcess | None = None
         self._model_operation = "idle"
         self._model_file_thread: ModelFileThread | None = None
-        self._gpu_runtime_directory = default_gpu_runtime_directory()
+        saved_gpu_runtime_directory = self._settings.value(
+            GPU_RUNTIME_DIRECTORY_SETTING
+        )
+        self._gpu_runtime_directory = Path(
+            saved_gpu_runtime_directory or default_gpu_runtime_directory()
+        )
         self._gpu_enabled = bool(
             self._settings.value(GPU_RUNTIME_SETTING, False, type=bool)
         ) and gpu_runtime_is_installed(self._gpu_runtime_directory)
@@ -835,6 +841,9 @@ class MainWindow(QMainWindow):
         dialog.install_requested.connect(
             lambda: run_after_close(self._install_gpu_runtime)
         )
+        dialog.location_requested.connect(
+            lambda: run_after_close(self._change_gpu_runtime_location)
+        )
         dialog.gpu_enabled_changed.connect(
             lambda enabled: run_after_close(
                 lambda: self._set_gpu_runtime_enabled(enabled)
@@ -849,6 +858,81 @@ class MainWindow(QMainWindow):
             )
         )
         dialog.exec()
+
+    def _save_gpu_runtime_directory(self, directory: str | Path) -> None:
+        self._gpu_runtime_directory = Path(directory)
+        self._settings.setValue(
+            GPU_RUNTIME_DIRECTORY_SETTING,
+            str(self._gpu_runtime_directory),
+        )
+        self._settings.sync()
+
+    def _change_gpu_runtime_location(self) -> None:
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            "GPU 가속 팩을 저장할 빈 폴더 선택",
+            str(self._gpu_runtime_directory.parent),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not destination:
+            return
+
+        destination_path = Path(destination)
+        if destination_path.absolute() == self._gpu_runtime_directory.absolute():
+            QMessageBox.information(
+                self,
+                "같은 위치입니다",
+                "현재 GPU 가속 팩 위치와 다른 폴더를 선택하세요.",
+            )
+            return
+        try:
+            if any(destination_path.iterdir()):
+                raise ValueError("선택한 폴더가 비어 있지 않습니다.")
+            ensure_writable_directory(destination_path)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(
+                self,
+                "새 위치를 사용할 수 없습니다",
+                "GPU 가속 팩은 비어 있고 쓰기 가능한 폴더에만 저장할 수 "
+                f"있습니다. 다른 폴더를 선택하세요.\n\n세부 정보: {error}",
+            )
+            return
+
+        if not gpu_runtime_is_installed(self._gpu_runtime_directory):
+            self._save_gpu_runtime_directory(destination_path)
+            self._acceleration_info = None
+            self._refresh_acceleration_status()
+            self.status_label.setText(
+                f"GPU 가속 팩 설치 위치를 변경했습니다 · {destination_path}"
+            )
+            return
+
+        source_absolute = self._gpu_runtime_directory.absolute()
+        destination_absolute = destination_path.absolute()
+        if (
+            destination_absolute.is_relative_to(source_absolute)
+            or source_absolute.is_relative_to(destination_absolute)
+        ):
+            QMessageBox.warning(
+                self,
+                "새 위치를 사용할 수 없습니다",
+                "현재 GPU 가속 팩 폴더와 겹치지 않는 별도의 빈 폴더를 "
+                "선택하세요.",
+            )
+            return
+
+        choice = QMessageBox.question(
+            self,
+            "GPU 가속 팩 이동",
+            f"GPU 가속 팩을 다음 위치로 옮길까요?\n\n{destination_path}\n\n"
+            "새 위치의 파일을 확인한 뒤 기존 파일을 삭제합니다.",
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        self._run_gpu_runtime_operation(
+            "move",
+            destination_directory=destination_path,
+        )
 
     def _set_gpu_runtime_enabled(self, enabled: bool):
         if enabled and not gpu_runtime_is_installed(
@@ -918,20 +1002,25 @@ class MainWindow(QMainWindow):
         action: str,
         pack_path: str | None = None,
         pack_release: GpuPackRelease | None = None,
+        destination_directory: Path | None = None,
     ):
         if self._gpu_runtime_thread is not None:
             return
-        title = "GPU 가속 팩 설치" if action == "install" else "GPU 가속 팩 삭제"
-        status = (
-            "GPU 가속 팩 배포 정보 확인 중"
-            if action == "install"
-            else "GPU 가속 파일을 삭제하는 중"
-        )
+        title = {
+            "install": "GPU 가속 팩 설치",
+            "move": "GPU 가속 팩 이동",
+            "delete": "GPU 가속 팩 삭제",
+        }[action]
+        status = {
+            "install": "GPU 가속 팩 배포 정보 확인 중",
+            "move": "GPU 가속 파일 이동 준비 중",
+            "delete": "GPU 가속 파일을 삭제하는 중",
+        }[action]
         dialog = ModelOperationDialog(
             title,
             status,
             parent=self,
-            allow_background=action == "install",
+            allow_background=action in {"install", "move"},
             cancellable=action == "install",
             determinate=action == "install",
         )
@@ -941,14 +1030,17 @@ class MainWindow(QMainWindow):
             str(self._gpu_runtime_directory),
             pack_path,
             pack_release,
+            str(destination_directory) if destination_directory else None,
         )
         self._gpu_runtime_thread = thread
         self._gpu_runtime_dialog = dialog
         self._gpu_runtime_action = action
-        self.acceleration_button.setText("● GPU 팩 설치 중")
+        self.acceleration_button.setText(
+            "● GPU 팩 이동 중" if action == "move" else "● GPU 팩 설치 중"
+        )
         self.acceleration_button.setObjectName("accelerationCheckingButton")
         self.acceleration_button.setToolTip(
-            "눌러서 백그라운드 GPU 가속 팩 설치 현황을 봅니다"
+            "눌러서 백그라운드 GPU 가속 팩 작업 현황을 봅니다"
         )
         self.acceleration_button.setEnabled(True)
         self._repolish_control(self.acceleration_button)
@@ -980,6 +1072,12 @@ class MainWindow(QMainWindow):
             outcome["result"] = "success"
             dialog.finish()
 
+        def handle_moved(source_removed: bool):
+            outcome["result"] = "success"
+            outcome["source_removed"] = source_removed
+            outcome["destination"] = destination_directory
+            dialog.finish()
+
         def handle_failure(error: str):
             outcome["result"] = "failure"
             outcome["error"] = error
@@ -994,6 +1092,7 @@ class MainWindow(QMainWindow):
         thread.progress_changed.connect(handle_progress)
         thread.installed.connect(handle_installed)
         thread.deleted.connect(handle_deleted)
+        thread.moved.connect(handle_moved)
         thread.failed.connect(handle_failure)
         thread.cancelled.connect(handle_cancelled)
         thread.finished.connect(
@@ -1038,6 +1137,17 @@ class MainWindow(QMainWindow):
             if action == "install":
                 self._replace_inference_worker(True)
                 message = "GPU 가속 팩을 설치했습니다. 다음 작업부터 GPU를 사용합니다."
+            elif action == "move":
+                destination = outcome.get("destination")
+                if destination is not None:
+                    self._save_gpu_runtime_directory(destination)
+                self._replace_inference_worker(self._gpu_enabled)
+                message = f"GPU 가속 팩을 새 위치로 옮겼습니다.\n\n{destination}"
+                if not outcome.get("source_removed", True):
+                    message += (
+                        "\n\n새 위치는 정상적으로 사용할 수 있지만 기존 폴더가 "
+                        "남았습니다. 기존 위치를 직접 확인하세요."
+                    )
             else:
                 message = "GPU 가속 팩을 삭제했습니다. 이후 CPU로 처리합니다."
             self._acceleration_info = None
@@ -2666,7 +2776,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(
                     self,
                     "GPU 가속 팩 작업 중",
-                    "GPU 가속 팩 삭제가 끝난 뒤 종료할 수 있습니다.",
+                    "GPU 가속 팩 이동 또는 삭제가 끝난 뒤 종료할 수 있습니다.",
                 )
             event.ignore()
             return

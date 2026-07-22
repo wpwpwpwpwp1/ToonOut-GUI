@@ -567,12 +567,15 @@ class UiSmokeTests(unittest.TestCase):
         info = AccelerationInfo(
             mode=AccelerationMode.GPU_PACK_AVAILABLE,
             device=NvidiaDevice("NVIDIA Test GPU", "999.1", 16.0),
+            runtime_directory="C:/ToonOut/GPU",
         )
         dialog = AccelerationDialog(info)
 
         buttons = [button.text() for button in dialog.findChildren(QPushButton)]
         self.assertEqual(dialog.windowTitle(), "처리 장치와 GPU 가속")
         self.assertIn("GPU 가속 팩 설치", buttons)
+        self.assertIn("설치 위치 변경", buttons)
+        self.assertEqual(dialog.runtime_path_field.text(), "C:/ToonOut/GPU")
         self.assertIsNotNone(
             dialog.findChild(QLabel, "accelerationAvailableLabel")
         )
@@ -719,6 +722,59 @@ class UiSmokeTests(unittest.TestCase):
             run.assert_called_once_with("install", pack_release=release)
             file_dialog.assert_not_called()
             window.close()
+
+    def test_gpu_pack_location_can_be_selected_before_installation(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(MainWindow, "_refresh_acceleration_status"),
+            patch.object(
+                QFileDialog,
+                "getExistingDirectory",
+                return_value=directory,
+            ),
+            patch("main.gpu_runtime_is_installed", return_value=False),
+        ):
+            window = MainWindow()
+            window._settings = MagicMock()
+
+            window._change_gpu_runtime_location()
+
+            self.assertEqual(window._gpu_runtime_directory, Path(directory))
+            window._settings.setValue.assert_called_with(
+                "acceleration/runtime_directory",
+                directory,
+            )
+            window.close()
+
+    def test_installed_gpu_pack_location_starts_safe_move(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "new-runtime"
+            destination.mkdir()
+            with (
+                patch.object(MainWindow, "_refresh_acceleration_status"),
+                patch.object(
+                    QFileDialog,
+                    "getExistingDirectory",
+                    return_value=str(destination),
+                ),
+                patch("main.gpu_runtime_is_installed", return_value=True),
+                patch.object(
+                    QMessageBox,
+                    "question",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ),
+            ):
+                window = MainWindow()
+                window._gpu_runtime_directory = root / "current-runtime"
+                with patch.object(window, "_run_gpu_runtime_operation") as run:
+                    window._change_gpu_runtime_location()
+
+                run.assert_called_once_with(
+                    "move",
+                    destination_directory=destination,
+                )
+                window.close()
 
     def test_model_install_process_forwards_percent_event(self):
         process = ModelInstallProcess("C:/models")

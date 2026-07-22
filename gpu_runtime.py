@@ -24,6 +24,7 @@ GPU_RUNTIME_KIND = "toonout-nvidia-gpu-runtime"
 GPU_RUNTIME_SCHEMA = 1
 GPU_WORKER_PROTOCOL = 2
 GPU_RUNTIME_SETTING = "acceleration/use_gpu_runtime"
+GPU_RUNTIME_DIRECTORY_SETTING = "acceleration/runtime_directory"
 GPU_PACK_PATTERN = "ToonOut-NVIDIA-GPU-Pack*.zip"
 GPU_PACK_PARTS_PATTERN = "ToonOut-NVIDIA-GPU-Pack*.parts.json"
 GPU_PACK_PARTS_KIND = "toonout-nvidia-gpu-pack-parts"
@@ -339,6 +340,36 @@ def gpu_runtime_size(directory: str | Path | None = None) -> int:
         return 0
 
 
+def _gpu_runtime_logical_size(directory: Path) -> int:
+    return sum(
+        path.stat().st_size
+        for path in directory.rglob("*")
+        if path.is_file()
+    )
+
+
+def _ensure_runtime_destination_is_managed(directory: Path) -> None:
+    """사용자 지정 폴더의 관련 없는 파일을 설치 교체에서 보호한다."""
+
+    if not directory.exists():
+        return
+    if not directory.is_dir():
+        raise GpuRuntimeError("GPU 가속 팩 설치 위치가 폴더가 아닙니다.")
+    if not any(directory.iterdir()):
+        return
+    if Path(os.path.abspath(directory)) == Path(
+        os.path.abspath(default_gpu_runtime_directory())
+    ):
+        return
+    try:
+        load_gpu_runtime_manifest(directory, verify_files=False)
+    except GpuRuntimeError as error:
+        raise GpuRuntimeError(
+            "선택한 GPU 가속 팩 폴더에 다른 파일이 있습니다. 비어 있는 "
+            "폴더를 선택하세요."
+        ) from error
+
+
 def _file_storage_size(path: Path) -> int:
     """압축 파일은 논리 크기가 아니라 실제 디스크 점유량을 반환한다."""
     logical_size = path.stat().st_size
@@ -526,6 +557,7 @@ def install_gpu_runtime(
     runtime_root = runtime_directory.parent
     runtime_root.mkdir(parents=True, exist_ok=True)
     cleanup_gpu_runtime_artifacts(runtime_directory)
+    _ensure_runtime_destination_is_managed(runtime_directory)
 
     last_status: str | None = None
     last_progress: tuple[str, int] | None = None
@@ -698,6 +730,102 @@ def install_gpu_runtime(
             split_reader.close()
         if staging_directory.exists() and staging_directory != runtime_directory:
             shutil.rmtree(staging_directory, ignore_errors=True)
+
+
+def move_gpu_runtime(
+    source_directory: str | Path,
+    destination_directory: str | Path,
+    report: Callable[[str], None] | None = None,
+) -> bool:
+    """검증된 GPU 팩을 옮기고 원본 정리 성공 여부를 반환한다."""
+
+    source = Path(source_directory)
+    destination = Path(destination_directory)
+    source_absolute = Path(os.path.abspath(source))
+    destination_absolute = Path(os.path.abspath(destination))
+    if source_absolute == destination_absolute:
+        raise GpuRuntimeError("현재 GPU 가속 팩 위치와 같은 폴더입니다.")
+    if (
+        destination_absolute.is_relative_to(source_absolute)
+        or source_absolute.is_relative_to(destination_absolute)
+    ):
+        raise GpuRuntimeError(
+            "현재 GPU 가속 팩 폴더의 안쪽이나 바깥쪽 폴더로는 옮길 수 없습니다."
+        )
+
+    load_gpu_runtime_manifest(source, verify_files=False)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    cleanup_gpu_runtime_artifacts(destination)
+
+    if destination.exists():
+        if not destination.is_dir() or any(destination.iterdir()):
+            raise GpuRuntimeError(
+                "새 위치가 비어 있지 않습니다. 빈 폴더를 선택하세요."
+            )
+        destination.rmdir()
+
+    if report is not None:
+        report("GPU 가속 팩을 새 위치로 옮기는 중")
+
+    # 같은 파일시스템에서는 디렉터리 이름만 바꿔 압축 상태를 보존한다.
+    try:
+        source.replace(destination)
+    except OSError:
+        pass
+    else:
+        try:
+            load_gpu_runtime_manifest(destination, verify_files=False)
+        except Exception:
+            destination.replace(source)
+            raise
+        return True
+
+    try:
+        required_bytes = _gpu_runtime_logical_size(source)
+    except OSError as error:
+        raise GpuRuntimeError(
+            "기존 GPU 가속 팩의 파일 크기를 확인하지 못했습니다."
+        ) from error
+    if shutil.disk_usage(destination.parent).free < required_bytes:
+        required_gb = required_bytes / 1_000_000_000
+        raise GpuRuntimeError(
+            "GPU 가속 팩을 옮길 디스크 공간이 부족합니다. "
+            f"새 드라이브에 최소 {required_gb:.1f}GB의 여유 공간이 필요합니다."
+        )
+
+    staging = destination.parent / (
+        f"{GPU_INSTALL_ARTIFACT_PREFIX}{os.getpid()}-{uuid.uuid4().hex}"
+    )
+    try:
+        shutil.copytree(source, staging)
+        if report is not None:
+            report("새 위치의 GPU 가속 파일을 검증하는 중")
+        manifest = load_gpu_runtime_manifest(staging)
+        if not gpu_runtime_is_compatible(manifest):
+            raise GpuRuntimeError(
+                "설치된 GPU 가속 팩이 현재 ToonOut과 호환되지 않습니다."
+            )
+        if report is not None:
+            report("GPU 가속 팩 디스크 사용량 최적화 중")
+        _compress_runtime_directory(staging)
+        staging.replace(destination)
+    except GpuRuntimeError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    except OSError as error:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise GpuRuntimeError(
+            "GPU 가속 팩을 새 위치로 옮기지 못했습니다. 새 폴더의 쓰기 "
+            "권한과 여유 공간을 확인하세요."
+        ) from error
+
+    if report is not None:
+        report("기존 GPU 가속 팩을 정리하는 중")
+    try:
+        shutil.rmtree(source)
+    except OSError:
+        return False
+    return True
 
 
 def delete_gpu_runtime(directory: str | Path | None = None) -> None:

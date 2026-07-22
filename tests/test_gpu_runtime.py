@@ -19,6 +19,7 @@ from gpu_runtime import (
     gpu_runtime_size,
     install_gpu_runtime,
     load_gpu_runtime_manifest,
+    move_gpu_runtime,
 )
 from scripts.split_gpu_pack import split_pack
 
@@ -78,13 +79,17 @@ class GpuRuntimeTests(unittest.TestCase):
             install_gpu_runtime(old_pack, destination)
 
             from gpu_runtime import load_gpu_runtime_manifest as real_load
+            destination_checks = 0
 
             def fail_after_swap(path, **kwargs):
+                nonlocal destination_checks
                 if (
                     Path(path) == destination
                     and kwargs.get("verify_files") is False
                 ):
-                    raise GpuRuntimeError("applied runtime check failed")
+                    destination_checks += 1
+                    if destination_checks >= 2:
+                        raise GpuRuntimeError("applied runtime check failed")
                 return real_load(path, **kwargs)
 
             from unittest.mock import patch
@@ -140,6 +145,84 @@ class GpuRuntimeTests(unittest.TestCase):
 
             delete_gpu_runtime(destination)
             self.assertFalse(destination.exists())
+
+    def test_install_does_not_replace_unrelated_custom_folder_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "pack.zip"
+            destination = root / "custom-runtime"
+            destination.mkdir()
+            unrelated = destination / "keep.txt"
+            unrelated.write_text("keep", encoding="utf-8")
+            write_fake_pack(pack)
+
+            with self.assertRaisesRegex(GpuRuntimeError, "다른 파일"):
+                install_gpu_runtime(pack, destination)
+
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
+
+    def test_installed_pack_moves_to_an_empty_selected_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "pack.zip"
+            source = root / "source-runtime"
+            destination = root / "destination-runtime"
+            destination.mkdir()
+            write_fake_pack(pack)
+            install_gpu_runtime(pack, source)
+
+            source_removed = move_gpu_runtime(source, destination)
+
+            self.assertTrue(source_removed)
+            self.assertFalse(source.exists())
+            self.assertTrue(gpu_runtime_is_installed(destination))
+            self.assertEqual(
+                (destination / "ToonOutGpuWorker.exe").read_bytes(),
+                b"fake worker",
+            )
+
+    def test_pack_move_rejects_nonempty_destination_without_touching_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "pack.zip"
+            source = root / "source-runtime"
+            destination = root / "destination-runtime"
+            destination.mkdir()
+            unrelated = destination / "keep.txt"
+            unrelated.write_text("keep", encoding="utf-8")
+            write_fake_pack(pack)
+            install_gpu_runtime(pack, source)
+
+            with self.assertRaisesRegex(GpuRuntimeError, "비어 있지"):
+                move_gpu_runtime(source, destination)
+
+            self.assertTrue(gpu_runtime_is_installed(source))
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
+
+    def test_cross_drive_pack_move_copies_verifies_then_removes_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "pack.zip"
+            source = root / "source-runtime"
+            destination = root / "destination-runtime"
+            destination.mkdir()
+            write_fake_pack(pack)
+            install_gpu_runtime(pack, source)
+            real_replace = Path.replace
+
+            def replace_with_cross_drive_failure(path, target):
+                if Path(path) == source:
+                    raise OSError("simulated cross-drive move")
+                return real_replace(path, target)
+
+            from unittest.mock import patch
+
+            with patch.object(Path, "replace", replace_with_cross_drive_failure):
+                source_removed = move_gpu_runtime(source, destination)
+
+            self.assertTrue(source_removed)
+            self.assertFalse(source.exists())
+            self.assertTrue(gpu_runtime_is_installed(destination))
 
     def test_install_reports_monotonic_percent_progress(self):
         with tempfile.TemporaryDirectory() as directory:

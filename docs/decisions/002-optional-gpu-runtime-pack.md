@@ -15,7 +15,9 @@ CPU만 사용하는 PC에서는 ToonOut이 바로 동작해야 하지만, 사용
 
 하나의 ToonOut 앱은 CPU 추론을 기본 포함한다. 호환되는 NVIDIA GPU가 감지되면 사용자가 `ToonOut-NVIDIA-GPU-Pack.zip`을 앱 안에서 설치할 수 있다.
 
-- 팩은 `%LOCALAPPDATA%\ToonOut\runtimes\nvidia-gpu`에 설치한다.
+- 팩은 기본적으로 `%LOCALAPPDATA%\ToonOut\runtimes\nvidia-gpu`에 설치한다.
+  `0.1.13`부터는 결정 010에 따라 사용자가 다른 빈 폴더를 선택하거나 설치된 팩을
+  이동할 수 있다.
 - manifest와 모든 파일의 SHA-256 및 크기를 검증한 뒤 기존 팩을 교체한다.
 - GPU 팩은 PyTorch 2.7.1과 CUDA 12.8 런타임을 포함한 독립 worker다.
 - GUI와 CPU PyTorch는 그대로 두고 GPU worker를 별도 프로세스로 실행한다.

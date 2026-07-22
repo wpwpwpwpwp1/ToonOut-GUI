@@ -21,6 +21,7 @@ from gpu_runtime import (
     gpu_runtime_size,
     install_gpu_runtime,
     load_gpu_runtime_manifest,
+    move_gpu_runtime,
 )
 from inference import ToonOutEngine
 from model_installation import (
@@ -781,6 +782,7 @@ class GpuRuntimeFileThread(QThread):
     progress_changed = Signal(str, int)
     installed = Signal(object)
     deleted = Signal()
+    moved = Signal(bool)
     failed = Signal(str)
     cancelled = Signal()
 
@@ -790,12 +792,14 @@ class GpuRuntimeFileThread(QThread):
         runtime_directory: str,
         pack_path: str | None = None,
         pack_release: GpuPackRelease | None = None,
+        destination_directory: str | None = None,
     ):
         super().__init__()
         self._action = action
         self._runtime_directory = runtime_directory
         self._pack_path = pack_path
         self._pack_release = pack_release
+        self._destination_directory = destination_directory
         self._cancel_event = threading.Event()
 
     def request_cancel(self) -> None:
@@ -828,6 +832,14 @@ class GpuRuntimeFileThread(QThread):
                 self.status_changed.emit("GPU 가속 파일을 삭제하는 중")
                 delete_gpu_runtime(self._runtime_directory)
                 self.deleted.emit()
+                return
+            if self._action == "move" and self._destination_directory:
+                source_removed = move_gpu_runtime(
+                    self._runtime_directory,
+                    self._destination_directory,
+                    self.status_changed.emit,
+                )
+                self.moved.emit(source_removed)
                 return
             raise ValueError("지원하지 않는 GPU 가속 팩 작업입니다.")
         except GpuRuntimeCancelled:

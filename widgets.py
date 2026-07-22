@@ -909,6 +909,7 @@ class AccelerationDialog(QDialog):
     """한 앱 안에서 CPU/GPU 선택과 GPU 팩 관리를 안내한다."""
 
     install_requested = Signal()
+    location_requested = Signal()
     gpu_enabled_changed = Signal(bool)
     remove_requested = Signal()
     driver_page_requested = Signal()
@@ -987,11 +988,20 @@ class AccelerationDialog(QDialog):
         if info.runtime_directory:
             path_title = QLabel("GPU 팩 설치 위치")
             path_title.setObjectName("fieldLabel")
-            path_label = QLineEdit(info.runtime_directory)
-            path_label.setObjectName("pathField")
-            path_label.setReadOnly(True)
+            path_row = QHBoxLayout()
+            self.runtime_path_field = QLineEdit(info.runtime_directory)
+            self.runtime_path_field.setObjectName("pathField")
+            self.runtime_path_field.setReadOnly(True)
+            location_button = QPushButton(
+                "가속 팩 이동" if info.runtime is not None else "설치 위치 변경"
+            )
+            location_button.setObjectName("secondaryButton")
+            location_button.setAccessibleName("GPU 가속 팩 저장 위치 변경")
+            location_button.clicked.connect(self.location_requested.emit)
+            path_row.addWidget(self.runtime_path_field, 1)
+            path_row.addWidget(location_button)
             details_layout.addWidget(path_title)
-            details_layout.addWidget(path_label)
+            details_layout.addLayout(path_row)
 
         guide_card = QFrame()
         guide_card.setObjectName("guideCard")
@@ -1088,7 +1098,7 @@ class AccelerationDialog(QDialog):
             return (
                 "GPU 가속을 사용합니다",
                 f"다음 배경 제거 작업은 {info.device.name}에서 실행됩니다.",
-                "GPU 가속 팩은 ToonOut 사용자 폴더에만 설치됩니다. 시스템 CUDA "
+                "GPU 가속 팩은 위에 표시된 선택 폴더에 설치됩니다. 시스템 CUDA "
                 "Toolkit이나 Python을 설치하지 않으며 언제든 CPU로 전환하거나 "
                 "가속 팩만 삭제할 수 있습니다.",
             )
@@ -1104,7 +1114,8 @@ class AccelerationDialog(QDialog):
                 "이 PC에서 GPU 가속을 추가할 수 있습니다",
                 f"{info.device.name}을 찾았습니다. 같은 ToonOut 앱에 GPU 지원을 추가할 수 있습니다.",
                 "설치 버튼을 누르면 현재 ToonOut에 맞는 공식 GPU 팩을 자동으로 "
-                "다운로드하고 검증합니다. 설치 전 10GB 이상의 여유 공간이 필요합니다. "
+                "다운로드하고 검증합니다. 선택한 드라이브에 설치 중 약 8.4GB의 "
+                "여유 공간이 필요합니다. "
                 "시스템 CUDA Toolkit이나 Python은 따로 설치하지 마세요.",
             )
         if info.mode == AccelerationMode.GPU_UNAVAILABLE:
