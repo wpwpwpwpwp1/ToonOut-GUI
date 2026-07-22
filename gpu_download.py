@@ -20,6 +20,8 @@ from gpu_runtime import (
     GpuRuntimeCancelled,
     GpuRuntimeError,
     GpuRuntimeManifest,
+    GPU_DOWNLOAD_ARTIFACT_PREFIX,
+    cleanup_gpu_runtime_artifacts,
     install_gpu_runtime,
     load_gpu_pack_parts,
 )
@@ -33,7 +35,6 @@ GPU_PACK_MANIFEST_SHA256 = (
     "e69198871ac71286a1b6d6b6e5ab1958237efe4010c9d39506c4c9567b7b7384"
 )
 GPU_PACK_ARCHIVE_SIZE = 3_265_060_719
-GPU_INSTALL_REQUIRED_FREE_BYTES = 10_000_000_000
 GPU_DOWNLOAD_PROGRESS_END = 40
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
@@ -242,20 +243,25 @@ def download_and_install_gpu_runtime(
     runtime_root = runtime_directory.parent
     try:
         runtime_root.mkdir(parents=True, exist_ok=True)
+        cleanup_gpu_runtime_artifacts(runtime_directory)
         free_bytes = shutil.disk_usage(runtime_root).free
     except OSError as error:
         raise GpuRuntimeError(
             "GPU 가속 팩 설치 위치를 준비하지 못했습니다. 사용자 폴더 권한을 "
             "확인하세요."
         ) from error
-    if free_bytes < GPU_INSTALL_REQUIRED_FREE_BYTES:
+    if free_bytes < release.archive_size:
+        required_gb = release.archive_size / 1_000_000_000
         raise GpuRuntimeError(
-            "GPU 가속 팩 설치를 시작하려면 설치 드라이브에 10GB 이상의 "
-            "여유 공간이 필요합니다."
+            "GPU 가속 팩 다운로드 공간이 부족합니다. 설치 드라이브에 "
+            f"최소 {required_gb:.1f}GB의 여유 공간이 필요합니다."
         )
 
     download_directory = Path(
-        tempfile.mkdtemp(prefix=".nvidia-gpu-download-", dir=runtime_root)
+        tempfile.mkdtemp(
+            prefix=f"{GPU_DOWNLOAD_ARTIFACT_PREFIX}{os.getpid()}-",
+            dir=runtime_root,
+        )
     )
     try:
         pack_path = download_gpu_pack(

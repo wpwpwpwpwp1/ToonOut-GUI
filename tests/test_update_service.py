@@ -133,6 +133,22 @@ class UpdateDownloadTests(unittest.TestCase):
             self.assertFalse((root / "0.1.6").exists())
             self.assertTrue(unrelated.is_dir())
 
+    def test_locked_installer_cache_reports_incomplete_then_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            version = root / "0.2.0"
+            version.mkdir()
+            (version / "setup.exe").write_bytes(b"running installer")
+
+            with patch(
+                "update_service.shutil.rmtree",
+                side_effect=OSError("file is in use"),
+            ):
+                self.assertFalse(prune_update_cache(root, None))
+
+            self.assertTrue(prune_update_cache(root, None))
+            self.assertFalse(version.exists())
+
     def test_download_is_verified_before_final_name_is_exposed(self):
         content = b"verified installer bytes"
         payload = valid_payload(content)

@@ -46,6 +46,24 @@ class UpdateUiTests(unittest.TestCase):
             self.assertIsNone(window._update_check_thread)
             window.close()
 
+    def test_post_install_cleanup_retries_a_locked_installer_cache(self):
+        with (
+            patch.object(MainWindow, "_refresh_acceleration_status"),
+            patch(
+                "main.prune_update_cache",
+                side_effect=[False, True],
+            ) as prune,
+            patch("main.QTimer.singleShot") as single_shot,
+        ):
+            window = MainWindow()
+
+            window._retry_update_cache_cleanup()
+            retry = single_shot.call_args.args[1]
+            retry()
+
+            self.assertEqual(prune.call_count, 2)
+            window.close()
+
     def test_up_to_date_result_restores_manual_check_button(self):
         with patch.object(MainWindow, "_refresh_acceleration_status"):
             window = MainWindow()

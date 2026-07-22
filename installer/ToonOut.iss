@@ -37,6 +37,12 @@ LicenseFile={#ProjectRoot}\LICENSE
 [Files]
 Source: "{#AppSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+; PyInstaller's private payload can contain files that disappear between
+; releases. Remove the previous managed payload before copying the new one.
+Type: files; Name: "{app}\{#AppExecutable}"
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Icons]
 Name: "{autoprograms}\ToonOut"; Filename: "{app}\{#AppExecutable}"
 Name: "{autodesktop}\ToonOut"; Filename: "{app}\{#AppExecutable}"; Tasks: desktopicon
@@ -45,4 +51,9 @@ Name: "{autodesktop}\ToonOut"; Filename: "{app}\{#AppExecutable}"; Tasks: deskto
 Name: "desktopicon"; Description: "바탕 화면에 ToonOut 바로가기 만들기"; GroupDescription: "추가 바로가기:"
 
 [Run]
-Filename: "{app}\{#AppExecutable}"; Description: "ToonOut 실행"; Flags: nowait runascurrentuser
+Filename: "{app}\{#AppExecutable}"; Parameters: "--cleanup-update-cache"; Description: "ToonOut 실행"; Flags: nowait runascurrentuser
+
+[UninstallDelete]
+; Downloaded installers are disposable app-owned cache, unlike models and the
+; optional GPU runtime, which users manage explicitly inside ToonOut.
+Type: filesandordirs; Name: "{localappdata}\ToonOut\updates"

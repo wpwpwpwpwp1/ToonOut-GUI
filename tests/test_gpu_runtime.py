@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -11,6 +12,7 @@ from gpu_runtime import (
     GPU_RUNTIME_SCHEMA,
     GpuRuntimeCancelled,
     GpuRuntimeError,
+    cleanup_gpu_runtime_artifacts,
     delete_gpu_runtime,
     find_adjacent_gpu_pack,
     gpu_runtime_is_installed,
@@ -49,6 +51,57 @@ def write_fake_pack(
 
 
 class GpuRuntimeTests(unittest.TestCase):
+    def test_abandoned_runtime_artifacts_are_removed_without_touching_active_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "nvidia-gpu"
+            abandoned = root / ".nvidia-gpu-install-2147483647-dead"
+            active = root / f".nvidia-gpu-download-{os.getpid()}-active"
+            abandoned.mkdir()
+            active.mkdir()
+            (abandoned / "large.part").write_bytes(b"unused")
+
+            removed = cleanup_gpu_runtime_artifacts(runtime)
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(abandoned.exists())
+            self.assertTrue(active.exists())
+
+    def test_failed_runtime_swap_restores_previous_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_pack = root / "old.zip"
+            new_pack = root / "new.zip"
+            destination = root / "runtime"
+            write_fake_pack(old_pack, b"old worker")
+            write_fake_pack(new_pack, b"new worker")
+            install_gpu_runtime(old_pack, destination)
+
+            from gpu_runtime import load_gpu_runtime_manifest as real_load
+
+            def fail_after_swap(path, **kwargs):
+                if (
+                    Path(path) == destination
+                    and kwargs.get("verify_files") is False
+                ):
+                    raise GpuRuntimeError("applied runtime check failed")
+                return real_load(path, **kwargs)
+
+            from unittest.mock import patch
+
+            with patch(
+                "gpu_runtime.load_gpu_runtime_manifest",
+                side_effect=fail_after_swap,
+            ):
+                with self.assertRaisesRegex(GpuRuntimeError, "applied runtime"):
+                    install_gpu_runtime(new_pack, destination)
+
+            self.assertEqual(
+                (destination / "ToonOutGpuWorker.exe").read_bytes(),
+                b"old worker",
+            )
+            self.assertEqual(list(root.glob(".runtime-previous-*")), [])
+
     def test_old_worker_protocol_is_rejected_before_installation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

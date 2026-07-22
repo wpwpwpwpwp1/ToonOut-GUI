@@ -4,12 +4,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$env:PYTHONNOUSERSITE = "1"
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildRoot = Join-Path $ProjectRoot "build\gpu-pack"
 $DistRoot = Join-Path $BuildRoot "dist"
 $WorkRoot = Join-Path $BuildRoot "work"
 $SpecRoot = Join-Path $BuildRoot "spec"
+$env:PYTHONUSERBASE = Join-Path $BuildRoot "python-user-base"
 $WorkerOutput = Join-Path $DistRoot "ToonOutGpuWorker"
 $PackOutput = Join-Path $ProjectRoot "dist\ToonOut-NVIDIA-GPU-Pack.zip"
 

@@ -4,16 +4,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$env:PYTHONNOUSERSITE = "1"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildRoot = Join-Path $ProjectRoot "build\app"
 $DistRoot = Join-Path $BuildRoot "dist"
 $WorkRoot = Join-Path $BuildRoot "work"
 $SpecRoot = Join-Path $BuildRoot "spec"
+$env:PYTHONUSERBASE = Join-Path $BuildRoot "python-user-base"
 $IconPath = Join-Path $ProjectRoot "assets\toonout.ico"
+$BrandIconPath = Join-Path $ProjectRoot "assets\toonout-icon.png"
 $MascotPath = Join-Path $ProjectRoot "assets\mascot"
 
 if (-not (Test-Path -LiteralPath $IconPath -PathType Leaf)) {
     throw "App icon was not found: $IconPath"
+}
+if (-not (Test-Path -LiteralPath $BrandIconPath -PathType Leaf)) {
+    throw "Brand icon was not found: $BrandIconPath"
 }
 if (-not (Test-Path -LiteralPath $MascotPath -PathType Container)) {
     throw "Mascot assets were not found: $MascotPath"
@@ -44,6 +50,7 @@ python -m PyInstaller `
     --name ToonOut `
     --icon $IconPath `
     --add-data "$IconPath;assets" `
+    --add-data "$BrandIconPath;assets" `
     --add-data "$MascotPath;assets\mascot" `
     --distpath $DistRoot `
     --workpath $WorkRoot `

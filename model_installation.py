@@ -3,6 +3,7 @@
 import os
 import shutil
 import stat
+import time
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -23,10 +24,13 @@ from model_files import (
     repository_directory,
     snapshot_directory,
 )
+from process_safety import process_is_running
 
 
 StatusReporter = Callable[[str], None]
 MODEL_REPOSITORIES = (BASE_MODEL_REPOSITORY, TOONOUT_REPOSITORY)
+MODEL_TRANSFER_PREFIX = ".toonout-transfer-"
+LEGACY_TRANSFER_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def _required_model_paths(
@@ -134,6 +138,38 @@ def _remove_managed_path(path: Path) -> None:
         path.unlink()
 
 
+def cleanup_model_transfer_artifacts(destination_directory: str | Path) -> int:
+    """Remove incomplete model copies left by a process that no longer exists."""
+
+    destination = Path(destination_directory)
+    try:
+        candidates = list(destination.iterdir())
+    except OSError:
+        return 0
+    cutoff = time.time() - LEGACY_TRANSFER_MAX_AGE_SECONDS
+    removed = 0
+    for candidate in candidates:
+        if not candidate.name.startswith(MODEL_TRANSFER_PREFIX):
+            continue
+        remainder = candidate.name[len(MODEL_TRANSFER_PREFIX):]
+        process_id, separator, _token = remainder.partition("-")
+        if separator and process_id.isdecimal():
+            if process_is_running(int(process_id)):
+                continue
+        else:
+            try:
+                if candidate.stat(follow_symlinks=False).st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+        try:
+            _remove_managed_path(candidate)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def delete_model_files(
     cache_directory: str | Path,
     report_status: StatusReporter | None = None,
@@ -144,6 +180,21 @@ def delete_model_files(
 
     for target in managed_model_directories(root):
         _remove_managed_path(target)
+
+    # Remove only now-empty container directories created for managed caches.
+    # The selected model root itself is preserved because it may be a folder
+    # the user also uses for unrelated files.
+    empty_containers = (
+        root / "modules" / "transformers_modules" / "ZhengPeng7",
+        root / "modules" / "transformers_modules",
+        root / "modules",
+        root / ".locks",
+    )
+    for container in empty_containers:
+        try:
+            container.rmdir()
+        except OSError:
+            continue
 
 
 def prepare_model_cache_for_install(
@@ -202,6 +253,7 @@ def move_model_files(
         raise FileNotFoundError("이동할 모델 설치를 찾지 못했습니다.")
 
     destination.mkdir(parents=True, exist_ok=True)
+    cleanup_model_transfer_artifacts(destination)
     destination_targets = [
         repository_directory(destination, repository)
         for repository in MODEL_REPOSITORIES
@@ -211,7 +263,9 @@ def move_model_files(
             "새 위치에 같은 모델 캐시가 이미 있습니다. 다른 폴더를 선택하세요."
         )
 
-    staging = destination / f".toonout-transfer-{uuid.uuid4().hex}"
+    staging = destination / (
+        f"{MODEL_TRANSFER_PREFIX}{os.getpid()}-{uuid.uuid4().hex}"
+    )
     _assert_managed_child(destination, staging)
     staging.mkdir()
 

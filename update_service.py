@@ -220,17 +220,17 @@ def verify_installer_file(release: UpdateRelease, path: str | Path) -> Path:
 def prune_update_cache(
     update_root: str | Path,
     keep_version: str | None,
-) -> None:
-    """앱이 만든 버전 폴더만 지우고 알 수 없는 파일은 보존한다."""
+) -> bool:
+    """앱 버전 폴더를 지우고 모두 사라졌는지 반환한다."""
     if keep_version is not None:
         parse_version(keep_version)
     root = Path(update_root)
     if not root.is_dir():
-        return
+        return True
     try:
         children = list(root.iterdir())
     except OSError:
-        return
+        return False
     for child in children:
         if (
             (keep_version is not None and child.name == keep_version)
@@ -245,6 +245,21 @@ def prune_update_cache(
         except OSError:
             # 캐시 정리 실패는 새 업데이트 다운로드를 막지 않는다.
             continue
+
+    try:
+        remaining_version_directory = any(
+            VERSION_PATTERN.fullmatch(child.name) is not None
+            for child in root.iterdir()
+        )
+    except OSError:
+        return False
+    if not remaining_version_directory:
+        try:
+            root.rmdir()
+        except OSError:
+            # 알 수 없는 사용자 파일이 있으면 업데이트 루트는 보존한다.
+            pass
+    return not remaining_version_directory
 
 
 def download_installer(

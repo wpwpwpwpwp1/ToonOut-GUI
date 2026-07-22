@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from inference import (
 )
 from model_installation import (
     BASE_MODEL_CODE_FILES,
+    cleanup_model_transfer_artifacts,
     delete_model_files,
     model_is_installed,
     model_storage_size,
@@ -139,6 +141,21 @@ class ModelInstallationStatusTests(unittest.TestCase):
 
 
 class ModelFileOperationTests(unittest.TestCase):
+    def test_abandoned_model_transfer_is_removed_but_active_one_is_kept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            abandoned = root / ".toonout-transfer-2147483647-dead"
+            active = root / f".toonout-transfer-{os.getpid()}-active"
+            abandoned.mkdir()
+            active.mkdir()
+            (abandoned / "partial.pth").write_bytes(b"unused")
+
+            removed = cleanup_model_transfer_artifacts(root)
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(abandoned.exists())
+            self.assertTrue(active.exists())
+
     def test_cleanup_worker_removes_partial_models_but_preserves_other_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

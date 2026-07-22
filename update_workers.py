@@ -79,6 +79,8 @@ class UpdateDownloadThread(QThread):
             )
             self.ready.emit(str(installer))
         except UpdateCancelled:
+            prune_update_cache(self._destination_directory.parent, None)
             return
         except UpdateError as error:
+            prune_update_cache(self._destination_directory.parent, None)
             self.failed.emit(str(error))

@@ -82,6 +82,7 @@ from model_installation import (
     model_is_installed,
     model_storage_size,
 )
+from inference import cleanup_abandoned_output_files
 from mascot import TsunaoWidget
 from preview import ImagePreview
 from performance import (
@@ -107,8 +108,14 @@ from processing import (
 )
 from styles import APP_STYLESHEET
 from update_config import UPDATE_PUBLIC_KEY_B64
-from update_service import UpdateError, UpdateRelease, verify_installer_file
+from update_service import (
+    UpdateError,
+    UpdateRelease,
+    prune_update_cache,
+    verify_installer_file,
+)
 from update_workers import UpdateCheckThread, UpdateDownloadThread
+from process_safety import start_parent_exit_watchdog
 from widgets import (
     AccelerationDialog,
     ImageListWidget,
@@ -125,6 +132,7 @@ from widgets import (
 SMALL_THUMBNAIL_MIN_WIDTH = 440
 LARGE_THUMBNAIL_MIN_WIDTH = 700
 BRAND_MASCOT_SIZE = 68
+BRAND_MASCOT_PIXEL_RATIO = 4.0
 
 
 def bundled_resource_path(*parts: str) -> Path:
@@ -136,6 +144,23 @@ def bundled_resource_path(*parts: str) -> Path:
 
 def application_icon_path() -> Path:
     return bundled_resource_path("assets", "toonout.ico")
+
+
+def brand_mascot_pixmap() -> QPixmap:
+    """Return a dense pixmap that stays sharp on high-DPI displays."""
+
+    source = QPixmap(str(bundled_resource_path("assets", "toonout-icon.png")))
+    if source.isNull():
+        return source
+    pixel_size = round(BRAND_MASCOT_SIZE * BRAND_MASCOT_PIXEL_RATIO)
+    pixmap = source.scaled(
+        pixel_size,
+        pixel_size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    pixmap.setDevicePixelRatio(BRAND_MASCOT_PIXEL_RATIO)
+    return pixmap
 
 
 def configure_application_font(application: QApplication) -> None:
@@ -157,11 +182,16 @@ def configure_application_font(application: QApplication) -> None:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, startup_model_directory: str | None = None):
+    def __init__(
+        self,
+        startup_model_directory: str | None = None,
+        *,
+        cleanup_update_cache: bool = False,
+    ):
         super().__init__()
 
         self.setWindowTitle(f"ToonOut {APP_VERSION} · 배경 제거")
-        self.resize(1560, 960)
+        self.resize(1440, 900)
         self.setMinimumSize(900, 620)
 
         self._items: list[BatchItem] = []
@@ -219,6 +249,7 @@ class MainWindow(QMainWindow):
         self._update_release: UpdateRelease | None = None
         self._update_installer_path: Path | None = None
         self._update_error: str | None = None
+        self._update_cleanup_attempts = 0
 
         if startup_model_directory:
             self._save_model_directory(self._model_directory)
@@ -230,6 +261,8 @@ class MainWindow(QMainWindow):
         self._update_interface_state()
         self._refresh_model_status()
         self._refresh_acceleration_status()
+        if cleanup_update_cache:
+            QTimer.singleShot(1_000, self._retry_update_cache_cleanup)
         QTimer.singleShot(1_500, self.check_for_updates)
 
     def _load_performance_policy(self) -> PerformancePolicy:
@@ -353,16 +386,9 @@ class MainWindow(QMainWindow):
         )
         self.brand_mascot.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.brand_mascot.setAccessibleName("츠나오 아이콘")
-        brand_pixmap = QPixmap(str(mascot_directory / "icon.png"))
+        brand_pixmap = brand_mascot_pixmap()
         if not brand_pixmap.isNull():
-            self.brand_mascot.setPixmap(
-                brand_pixmap.scaled(
-                    BRAND_MASCOT_SIZE,
-                    BRAND_MASCOT_SIZE,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            self.brand_mascot.setPixmap(brand_pixmap)
 
         title = QLabel("ToonOut")
         title.setObjectName("appTitle")
@@ -474,6 +500,15 @@ class MainWindow(QMainWindow):
         self.update_status_button.setToolTip(tooltip)
         self.update_status_button.show()
         self._repolish_control(self.update_status_button)
+
+    def _retry_update_cache_cleanup(self):
+        """Retry while the just-finished installer still holds its own EXE."""
+
+        self._update_cleanup_attempts += 1
+        if prune_update_cache(default_update_directory(), None):
+            return
+        if self._update_cleanup_attempts < 30:
+            QTimer.singleShot(2_000, self._retry_update_cache_cleanup)
 
     def check_for_updates(self):
         if not UPDATE_PUBLIC_KEY_B64:
@@ -1790,22 +1825,31 @@ class MainWindow(QMainWindow):
         if pending:
             self.start_processing(pending)
 
-    def _expand_paths(self, raw_paths: list[str]) -> list[Path]:
+    def _expand_paths(self, raw_paths: list[str]) -> tuple[list[Path], int]:
         expanded: list[Path] = []
+        rejected = 0
         for raw_path in raw_paths:
             path = Path(raw_path)
             if path.is_dir():
-                expanded.extend(
-                    child
-                    for child in sorted(
+                try:
+                    children = sorted(
                         path.iterdir(),
                         key=lambda entry: entry.name.casefold(),
                     )
-                    if child.is_file()
-                )
+                except OSError:
+                    rejected += 1
+                    continue
+                for child in children:
+                    try:
+                        if child.is_file():
+                            expanded.append(child)
+                    except OSError:
+                        rejected += 1
             elif path.is_file():
                 expanded.append(path)
-        return expanded
+            else:
+                rejected += 1
+        return expanded, rejected
 
     def _validate_image(self, path: Path) -> str | None:
         if path.suffix.casefold() not in SUPPORTED_SUFFIXES:
@@ -1830,11 +1874,15 @@ class MainWindow(QMainWindow):
             for item in self._items
         }
         added_count = 0
-        rejected_count = 0
+        expanded_paths, rejected_count = self._expand_paths(raw_paths)
         added_list_items: list[QListWidgetItem] = []
 
-        for path in self._expand_paths(raw_paths):
-            resolved = str(path.resolve())
+        for path in expanded_paths:
+            try:
+                resolved = str(path.resolve(strict=True))
+            except OSError:
+                rejected_count += 1
+                continue
             if resolved.casefold() in existing_paths:
                 continue
 
@@ -2189,6 +2237,8 @@ class MainWindow(QMainWindow):
             )
             return
 
+        cleanup_abandoned_output_files(result_folder)
+
         jobs = []
         reserved_paths: set[Path] = set()
         self._active_auto_save_ids.clear()
@@ -2300,9 +2350,19 @@ class MainWindow(QMainWindow):
                 self._model_install_dialog.show_failure(error)
             return
 
+        for item in self._items:
+            if (
+                item.item_id in self._active_job_ids
+                and item.state in {ItemState.QUEUED, ItemState.PROCESSING}
+            ):
+                item.state = ItemState.FAILED
+                item.error = error
+                self._refresh_list_item(item)
         self._processing = False
         self.tsunao.processing_finished(completed=False)
         self._auto_continue_allowed = False
+        self._active_job_ids.clear()
+        self._active_auto_save_ids.clear()
         self._set_input_controls_enabled(True)
         self.progress_bar.hide()
         self.pause_button.hide()
@@ -2467,6 +2527,7 @@ class MainWindow(QMainWindow):
             else []
         )
         self._active_job_ids.clear()
+        self._active_auto_save_ids.clear()
         self._update_interface_state(keep_status=True)
         if self._close_after_worker:
             self.close()
@@ -2693,11 +2754,15 @@ def parse_app_arguments(arguments: list[str]):
     parser.add_argument("--model-install-status")
     parser.add_argument("--open-model-installer", action="store_true")
     parser.add_argument("--restore-image", action="append", default=[])
+    parser.add_argument("--cleanup-update-cache", action="store_true")
+    parser.add_argument("--parent-pid", type=int)
     return parser.parse_known_args(arguments)
 
 
 if __name__ == "__main__":
     app_arguments, qt_arguments = parse_app_arguments(sys.argv[1:])
+    if app_arguments.parent_pid:
+        start_parent_exit_watchdog(app_arguments.parent_pid)
     if app_arguments.model_install_worker:
         if not app_arguments.model_install_status:
             raise SystemExit(2)
@@ -2723,7 +2788,10 @@ if __name__ == "__main__":
     app_icon = QIcon(str(application_icon_path()))
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
-    window = MainWindow(app_arguments.model_directory)
+    window = MainWindow(
+        app_arguments.model_directory,
+        cleanup_update_cache=app_arguments.cleanup_update_cache,
+    )
     window.show()
     if app_arguments.restore_image:
         QTimer.singleShot(

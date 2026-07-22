@@ -26,12 +26,18 @@ from PySide6.QtWidgets import (
     QLabel,
     QListView,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
 )
 
 from acceleration import AccelerationInfo, AccelerationMode, NvidiaDevice
 from app_core import BatchItem, ItemState, OutputNamingPolicy
-from main import BRAND_MASCOT_SIZE, MainWindow, configure_application_font
+from main import (
+    BRAND_MASCOT_SIZE,
+    MainWindow,
+    brand_mascot_pixmap,
+    configure_application_font,
+)
 from mascot import TsunaoState, TsunaoWidget
 from processing import InferenceThread, ModelInstallProcess
 from widgets import (
@@ -167,10 +173,14 @@ class UiSmokeTests(unittest.TestCase):
         with patch.object(MainWindow, "_refresh_acceleration_status"):
             window = MainWindow()
 
-            self.assertEqual(window.size().width(), 1560)
-            self.assertEqual(window.size().height(), 960)
+            self.assertEqual(window.size().width(), 1440)
+            self.assertEqual(window.size().height(), 900)
             self.assertEqual(window.brand_mascot.width(), BRAND_MASCOT_SIZE)
             self.assertEqual(window.brand_mascot.height(), BRAND_MASCOT_SIZE)
+            brand_pixmap = brand_mascot_pixmap()
+            self.assertIsNotNone(brand_pixmap)
+            self.assertGreater(brand_pixmap.width(), BRAND_MASCOT_SIZE)
+            self.assertEqual(brand_pixmap.devicePixelRatio(), 4.0)
             self.assertEqual(window.tsunao.DISPLAY_SIZE, TsunaoWidget.DISPLAY_SIZE)
             self.assertEqual(window.tsunao.DISPLAY_SIZE, 188)
             self.assertFalse(hasattr(window, "view_selector"))
@@ -844,6 +854,30 @@ class UiSmokeTests(unittest.TestCase):
             self.assertTrue(item.result_saved)
             window._on_batch_finished(False)
             self.assertEqual(window.tsunao.state, TsunaoState.COMPLETE)
+            window.close()
+
+    def test_worker_failure_makes_active_items_retryable(self):
+        with (
+            patch.object(MainWindow, "_refresh_acceleration_status"),
+            patch.object(QMessageBox, "warning"),
+        ):
+            window = MainWindow()
+            item = BatchItem(
+                "item-1",
+                "C:/images/character.jpg",
+                state=ItemState.PROCESSING,
+            )
+            window._items = [item]
+            window._items_by_id = {item.item_id: item}
+            window._active_job_ids = {item.item_id}
+            window._processing = True
+
+            window._on_model_failed("GPU worker가 예기치 않게 종료되었습니다")
+
+            self.assertEqual(item.state, ItemState.FAILED)
+            self.assertIn("GPU worker", item.error)
+            self.assertFalse(window._active_job_ids)
+            self.assertFalse(window._processing)
             window.close()
 
     def test_processing_without_output_prompts_for_folder_and_uses_it(self):

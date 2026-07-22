@@ -1,4 +1,6 @@
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +11,7 @@ from inference import (
     _combine_alpha,
     _existing_alpha,
     _publish_without_overwrite,
+    cleanup_abandoned_output_files,
 )
 
 
@@ -35,6 +38,42 @@ class ExistingAlphaTests(unittest.TestCase):
 
 
 class OutputPublishingTests(unittest.TestCase):
+    def test_abandoned_temporary_output_is_removed_but_active_one_is_kept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            abandoned = root / (
+                ".result.png.toonout-2147483647-"
+                "0123456789abcdef0123456789abcdef.tmp"
+            )
+            active = root / (
+                f".result.png.toonout-{os.getpid()}-"
+                "fedcba9876543210fedcba9876543210.tmp"
+            )
+            unrelated = root / "result.tmp"
+            for path in (abandoned, active, unrelated):
+                path.write_bytes(b"temporary")
+
+            removed = cleanup_abandoned_output_files(root)
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(abandoned.exists())
+            self.assertTrue(active.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_old_legacy_temporary_output_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / (
+                ".result.png.0123456789abcdef0123456789abcdef.tmp"
+            )
+            legacy.write_bytes(b"old temporary")
+            old = time.time() - 2 * 24 * 60 * 60
+            os.utime(legacy, (old, old))
+
+            cleanup_abandoned_output_files(root)
+
+            self.assertFalse(legacy.exists())
+
     def test_existing_destination_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

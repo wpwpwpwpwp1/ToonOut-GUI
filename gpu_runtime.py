@@ -11,10 +11,13 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
+
+from process_safety import process_is_running
 
 
 GPU_RUNTIME_KIND = "toonout-nvidia-gpu-runtime"
@@ -28,6 +31,9 @@ GPU_PACK_PARTS_SCHEMA = 1
 MAX_PACK_FILES = 100_000
 MAX_UNCOMPRESSED_BYTES = 16 * 1024**3
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+GPU_DOWNLOAD_ARTIFACT_PREFIX = ".nvidia-gpu-download-"
+GPU_INSTALL_ARTIFACT_PREFIX = ".nvidia-gpu-install-"
+LEGACY_ARTIFACT_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 class GpuRuntimeError(RuntimeError):
@@ -146,6 +152,61 @@ def default_gpu_runtime_directory(local_app_data: str | None = None) -> Path:
     else:
         base = Path.home() / "AppData" / "Local"
     return base / "ToonOut" / "runtimes" / "nvidia-gpu"
+
+
+def _artifact_owner_process_id(path: Path, prefixes: tuple[str, ...]) -> int | None:
+    for prefix in prefixes:
+        if not path.name.startswith(prefix):
+            continue
+        remainder = path.name[len(prefix):]
+        process_id, separator, _token = remainder.partition("-")
+        if separator and process_id.isdecimal():
+            return int(process_id)
+    return None
+
+
+def cleanup_gpu_runtime_artifacts(
+    directory: str | Path | None = None,
+) -> int:
+    """Remove abandoned download, staging, and rollback directories."""
+
+    runtime_directory = Path(directory or default_gpu_runtime_directory())
+    runtime_root = runtime_directory.parent
+    previous_prefix = f".{runtime_directory.name}-previous-"
+    prefixes = (
+        GPU_DOWNLOAD_ARTIFACT_PREFIX,
+        GPU_INSTALL_ARTIFACT_PREFIX,
+        previous_prefix,
+    )
+    try:
+        candidates = list(runtime_root.iterdir())
+    except OSError:
+        return 0
+
+    cutoff = time.time() - LEGACY_ARTIFACT_MAX_AGE_SECONDS
+    removed = 0
+    for candidate in candidates:
+        if not any(candidate.name.startswith(prefix) for prefix in prefixes):
+            continue
+        owner_process_id = _artifact_owner_process_id(candidate, prefixes)
+        if owner_process_id is not None:
+            if process_is_running(owner_process_id):
+                continue
+        else:
+            try:
+                if candidate.stat(follow_symlinks=False).st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+        try:
+            if candidate.is_symlink() or not candidate.is_dir():
+                candidate.unlink()
+            else:
+                shutil.rmtree(candidate)
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def _safe_relative_path(value: str) -> Path:
@@ -464,13 +525,20 @@ def install_gpu_runtime(
     runtime_directory = Path(destination or default_gpu_runtime_directory())
     runtime_root = runtime_directory.parent
     runtime_root.mkdir(parents=True, exist_ok=True)
+    cleanup_gpu_runtime_artifacts(runtime_directory)
 
     last_status: str | None = None
     last_progress: tuple[str, int] | None = None
 
-    def update(message: str, percent: int | None = None):
+    def update(
+        message: str,
+        percent: int | None = None,
+        *,
+        check_cancel: bool = True,
+    ):
         nonlocal last_status, last_progress
-        _raise_if_cancelled(should_cancel)
+        if check_cancel:
+            _raise_if_cancelled(should_cancel)
         if report is not None and message != last_status:
             report(message)
             last_status = message
@@ -485,10 +553,28 @@ def install_gpu_runtime(
 
     update("GPU 가속 팩 파일 목록 확인 중", 0)
     staging_directory = Path(
-        tempfile.mkdtemp(prefix=".nvidia-gpu-install-", dir=runtime_root)
+        tempfile.mkdtemp(
+            prefix=f"{GPU_INSTALL_ARTIFACT_PREFIX}{os.getpid()}-",
+            dir=runtime_root,
+        )
     )
     split_reader: _SplitPackReader | None = None
     backup_directory: Path | None = None
+    runtime_was_replaced = False
+
+    def restore_previous_runtime() -> None:
+        nonlocal backup_directory, runtime_was_replaced
+        if runtime_was_replaced and runtime_directory.exists():
+            shutil.rmtree(runtime_directory)
+        if (
+            backup_directory is not None
+            and backup_directory.exists()
+            and not runtime_directory.exists()
+        ):
+            backup_directory.replace(runtime_directory)
+            backup_directory = None
+        runtime_was_replaced = False
+
     try:
         if pack.name.endswith(".parts.json"):
             update("분할 GPU 가속 팩 검증 중", 5)
@@ -564,24 +650,48 @@ def install_gpu_runtime(
         update("GPU 가속 팩 적용 중", 98)
         if runtime_directory.exists():
             backup_directory = runtime_root / (
-                f".{runtime_directory.name}-previous-{os.getpid()}"
+                f".{runtime_directory.name}-previous-{os.getpid()}-"
+                f"{uuid.uuid4().hex}"
             )
-            if backup_directory.exists():
-                shutil.rmtree(backup_directory)
             runtime_directory.replace(backup_directory)
         staging_directory.replace(runtime_directory)
         staging_directory = runtime_directory
+        runtime_was_replaced = True
+        applied_manifest = load_gpu_runtime_manifest(
+            runtime_directory,
+            verify_files=False,
+        )
         if backup_directory is not None:
-            shutil.rmtree(backup_directory, ignore_errors=True)
-        update("GPU 가속 팩 설치 완료", 100)
-        return load_gpu_runtime_manifest(runtime_directory, verify_files=False)
+            try:
+                shutil.rmtree(backup_directory)
+                backup_directory = None
+            except OSError:
+                # The new runtime is already verified. A later background
+                # cleanup pass will retry a temporarily locked old runtime.
+                pass
+        runtime_was_replaced = False
+        update("GPU 가속 팩 설치 완료", 100, check_cancel=False)
+        return applied_manifest
     except GpuRuntimeCancelled:
-        if backup_directory is not None and not runtime_directory.exists():
-            backup_directory.replace(runtime_directory)
+        restore_previous_runtime()
+        raise
+    except GpuRuntimeError:
+        try:
+            restore_previous_runtime()
+        except OSError as rollback_error:
+            raise GpuRuntimeError(
+                "GPU 가속 팩 적용을 되돌리지 못했습니다. ToonOut을 다시 "
+                "실행한 뒤 GPU 가속 팩을 다시 설치하세요."
+            ) from rollback_error
         raise
     except (OSError, zipfile.BadZipFile) as error:
-        if backup_directory is not None and not runtime_directory.exists():
-            backup_directory.replace(runtime_directory)
+        try:
+            restore_previous_runtime()
+        except OSError as rollback_error:
+            raise GpuRuntimeError(
+                "GPU 가속 팩 적용을 되돌리지 못했습니다. ToonOut을 다시 "
+                "실행한 뒤 GPU 가속 팩을 다시 설치하세요."
+            ) from rollback_error
         raise GpuRuntimeError(f"GPU 가속 팩을 설치하지 못했습니다: {error}") from error
     finally:
         if split_reader is not None:
@@ -596,5 +706,10 @@ def delete_gpu_runtime(directory: str | Path | None = None) -> None:
     if directory is None and runtime_directory != expected:
         raise GpuRuntimeError("GPU 가속 팩 삭제 위치가 올바르지 않습니다.")
     if runtime_directory.exists():
-        load_gpu_runtime_manifest(runtime_directory, verify_files=False)
+        try:
+            load_gpu_runtime_manifest(runtime_directory, verify_files=False)
+        except GpuRuntimeError:
+            if runtime_directory != expected:
+                raise
         shutil.rmtree(runtime_directory)
+    cleanup_gpu_runtime_artifacts(runtime_directory)

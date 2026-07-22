@@ -165,9 +165,9 @@ class GpuPackDownloadTests(unittest.TestCase):
             patch("gpu_download.shutil.disk_usage") as disk_usage,
             patch("gpu_download.download_gpu_pack") as download,
         ):
-            disk_usage.return_value.free = 9_999_999_999
+            disk_usage.return_value.free = release.archive_size - 1
 
-            with self.assertRaisesRegex(GpuRuntimeError, "10GB"):
+            with self.assertRaisesRegex(GpuRuntimeError, "다운로드 공간"):
                 download_and_install_gpu_runtime(
                     release,
                     Path(directory) / "nvidia-gpu",

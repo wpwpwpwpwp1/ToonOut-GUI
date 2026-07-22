@@ -3,7 +3,10 @@
 import hashlib
 import importlib.util
 import os
+import re
+import stat
 import sys
+import time
 import types
 import warnings
 from pathlib import Path
@@ -23,6 +26,14 @@ from model_files import (
     model_path_entry_exists,
     snapshot_directory,
 )
+from process_safety import process_is_running
+
+
+OUTPUT_TEMP_PATTERN = re.compile(
+    r"^\..+\.toonout-(\d+)-[0-9a-f]{32}\.tmp$"
+)
+LEGACY_OUTPUT_TEMP_PATTERN = re.compile(r"^\..+\.[0-9a-f]{32}\.tmp$")
+LEGACY_TEMP_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def _download_progress_class(
@@ -213,6 +224,43 @@ def _publish_without_overwrite(temporary: Path, destination: Path) -> None:
             raise
     else:
         temporary.unlink()
+
+
+def cleanup_abandoned_output_files(directory: str | Path) -> int:
+    """Delete only ToonOut output temporaries whose owner is no longer alive."""
+
+    folder = Path(directory)
+    try:
+        candidates = list(folder.iterdir())
+    except OSError:
+        return 0
+
+    removed = 0
+    cutoff = time.time() - LEGACY_TEMP_MAX_AGE_SECONDS
+    for candidate in candidates:
+        match = OUTPUT_TEMP_PATTERN.fullmatch(candidate.name)
+        legacy = LEGACY_OUTPUT_TEMP_PATTERN.fullmatch(candidate.name)
+        if match is not None:
+            if process_is_running(int(match.group(1))):
+                continue
+        elif legacy is not None:
+            try:
+                if candidate.stat(follow_symlinks=False).st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+        else:
+            continue
+
+        try:
+            status = candidate.stat(follow_symlinks=False)
+            if not (stat.S_ISREG(status.st_mode) or stat.S_ISLNK(status.st_mode)):
+                continue
+            candidate.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def verify_model_runtime_dependencies() -> None:
@@ -460,7 +508,7 @@ class ToonOutEngine:
         destination = Path(output_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(
-            f".{destination.name}.{uuid4().hex}.tmp"
+            f".{destination.name}.toonout-{os.getpid()}-{uuid4().hex}.tmp"
         )
         try:
             result.save(temporary, format="PNG")

@@ -16,6 +16,7 @@ from acceleration import detect_acceleration
 from gpu_download import GpuPackRelease, download_and_install_gpu_runtime
 from gpu_runtime import (
     GpuRuntimeCancelled,
+    cleanup_gpu_runtime_artifacts,
     delete_gpu_runtime,
     gpu_runtime_size,
     install_gpu_runtime,
@@ -34,6 +35,7 @@ from performance import (
     apply_torch_policy,
     preset_policy,
 )
+from process_safety import KillOnCloseProcessJob
 
 
 class InferenceThread(QThread):
@@ -345,6 +347,11 @@ class ModelInstallProcess(QProcess):
         self.start()
 
     def _set_worker_command(self, worker_arguments: list[str]) -> None:
+        worker_arguments = [
+            *worker_arguments,
+            "--parent-pid",
+            str(os.getpid()),
+        ]
         if getattr(sys, "frozen", False):
             program = sys.executable
             arguments = worker_arguments
@@ -663,6 +670,8 @@ class ExternalInferenceThread(QThread):
             # 기존 frozen worker는 아래의 바이트 디코더가 별도로 처리한다.
             worker_environment["PYTHONIOENCODING"] = "utf-8"
             worker_environment["PYTHONUTF8"] = "1"
+            process = None
+            process_job = KillOnCloseProcessJob()
             try:
                 process = subprocess.Popen(
                     command,
@@ -671,6 +680,18 @@ class ExternalInferenceThread(QThread):
                     creationflags=creation_flags,
                     env=worker_environment,
                 )
+                try:
+                    process_job.assign(process)
+                except OSError as error:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    raise OSError(
+                        "GPU worker의 안전 종료를 구성하지 못했습니다."
+                    ) from error
                 if self._cancel_event.is_set():
                     cancel_path.touch(exist_ok=True)
                 if self._pause_requested.is_set():
@@ -701,6 +722,7 @@ class ExternalInferenceThread(QThread):
                 )
                 return
             finally:
+                process_job.close()
                 self._cancel_path = None
                 self._pause_path = None
 
@@ -830,6 +852,7 @@ class AccelerationDetectionThread(QThread):
 
     def run(self):
         try:
+            cleanup_gpu_runtime_artifacts(self._runtime_directory)
             try:
                 runtime = load_gpu_runtime_manifest(
                     self._runtime_directory,
