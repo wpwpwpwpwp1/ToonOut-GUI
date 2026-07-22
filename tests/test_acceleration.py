@@ -3,6 +3,7 @@ from pathlib import Path
 
 from acceleration import (
     AccelerationMode,
+    GpuDevice,
     NvidiaDevice,
     detect_acceleration,
 )
@@ -18,6 +19,18 @@ RUNTIME = GpuRuntimeManifest(
     worker_protocol=GPU_WORKER_PROTOCOL,
 )
 DEVICE = NvidiaDevice("NVIDIA Test GPU", "999.1", 16.0)
+AMD_DEVICE = GpuDevice("AMD Radeon Test GPU", "1.2.3", 16.0, "amd")
+AMD_RUNTIME = GpuRuntimeManifest(
+    runtime_version="test",
+    torch_version="2.10.0+rocm7.14.0",
+    cuda_runtime="",
+    worker_path=Path("ToonOutGpuWorker.exe"),
+    files=(),
+    worker_protocol=GPU_WORKER_PROTOCOL,
+    vendor="amd",
+    backend="rocm",
+    compute_runtime="7.14.0",
+)
 
 
 class AccelerationTests(unittest.TestCase):
@@ -56,6 +69,27 @@ class AccelerationTests(unittest.TestCase):
         )
         self.assertEqual(unavailable.mode, AccelerationMode.GPU_UNAVAILABLE)
         self.assertEqual(cpu.mode, AccelerationMode.CPU_ONLY)
+
+    def test_amd_runtime_selects_matching_amd_device(self):
+        info = detect_acceleration(
+            AMD_RUNTIME,
+            True,
+            nvidia_probe=lambda: DEVICE,
+            amd_probe=lambda: AMD_DEVICE,
+        )
+        self.assertEqual(info.mode, AccelerationMode.GPU_ACTIVE)
+        self.assertEqual(info.device, AMD_DEVICE)
+        self.assertEqual(info.runtime.runtime_label, "ROCm 7.14.0")
+
+    def test_amd_runtime_does_not_activate_on_nvidia_device(self):
+        info = detect_acceleration(
+            AMD_RUNTIME,
+            True,
+            nvidia_probe=lambda: DEVICE,
+            amd_probe=lambda: None,
+        )
+        self.assertEqual(info.mode, AccelerationMode.GPU_UNAVAILABLE)
+        self.assertIsNone(info.device)
 
 
 if __name__ == "__main__":

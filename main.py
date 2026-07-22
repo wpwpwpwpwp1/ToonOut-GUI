@@ -75,6 +75,7 @@ from gpu_runtime import (
     GPU_RUNTIME_DIRECTORY_SETTING,
     GPU_RUNTIME_SETTING,
     default_gpu_runtime_directory,
+    find_adjacent_gpu_pack,
     gpu_runtime_is_compatible,
     gpu_runtime_is_installed,
     load_gpu_runtime_manifest,
@@ -419,7 +420,7 @@ class MainWindow(QMainWindow):
         self.acceleration_button = QPushButton("장치 확인 중")
         self.acceleration_button.setObjectName("accelerationCheckingButton")
         self.acceleration_button.setToolTip(
-            "CPU/GPU 처리 상태와 선택형 NVIDIA 가속 팩을 관리합니다"
+            "CPU/GPU 처리 상태와 선택형 GPU 가속 팩을 관리합니다"
         )
         self.acceleration_button.setEnabled(False)
         self.update_status_button = QPushButton("업데이트 확인")
@@ -854,7 +855,14 @@ class MainWindow(QMainWindow):
         )
         dialog.driver_page_requested.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl("https://www.nvidia.com/ko-kr/drivers/")
+                QUrl(
+                    "https://www.amd.com/ko/support/download/drivers.html"
+                    if (
+                        self._acceleration_info.device is not None
+                        and self._acceleration_info.device.vendor == "amd"
+                    )
+                    else "https://www.nvidia.com/ko-kr/drivers/"
+                )
             )
         )
         dialog.exec()
@@ -941,7 +949,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "GPU 가속 팩이 없습니다",
-                "먼저 ToonOut NVIDIA GPU 가속 팩을 설치하세요.",
+                "먼저 이 그래픽 카드에 맞는 ToonOut GPU 가속 팩을 설치하세요.",
             )
             return
         if enabled:
@@ -965,12 +973,35 @@ class MainWindow(QMainWindow):
         self._acceleration_info = None
         self._refresh_acceleration_status()
         self.status_label.setText(
-            "다음 작업부터 NVIDIA GPU를 사용합니다"
+            "다음 작업부터 GPU를 사용합니다"
             if enabled
             else "다음 작업부터 CPU를 사용합니다"
         )
 
     def _install_gpu_runtime(self):
+        device = (
+            self._acceleration_info.device
+            if self._acceleration_info is not None
+            else None
+        )
+        if device is not None and device.vendor == "amd":
+            pack = find_adjacent_gpu_pack()
+            if pack is None or "AMD-ROCm" not in pack.name:
+                selected, _filter = QFileDialog.getOpenFileName(
+                    self,
+                    "AMD ROCm GPU 가속 팩 선택",
+                    str(Path.home()),
+                    (
+                        "ToonOut AMD GPU 팩 "
+                        "(ToonOut-AMD-ROCm-GPU-Pack*.parts.json "
+                        "ToonOut-AMD-ROCm-GPU-Pack*.zip)"
+                    ),
+                )
+                if not selected:
+                    return
+                pack = Path(selected)
+            self._run_gpu_runtime_operation("install", pack_path=str(pack))
+            return
         try:
             release = current_gpu_pack_release()
         except Exception as error:
@@ -986,7 +1017,7 @@ class MainWindow(QMainWindow):
         choice = QMessageBox.warning(
             self,
             "GPU 가속 팩 삭제",
-            "ToonOut의 NVIDIA GPU 가속 파일만 삭제할까요?\n\n"
+            "ToonOut의 GPU 가속 파일만 삭제할까요?\n\n"
             f"위치: {self._gpu_runtime_directory}\n\n"
             "모델과 사용자 이미지는 삭제하지 않으며 이후 CPU로 처리합니다.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,

@@ -1,4 +1,4 @@
-"""선택형 NVIDIA GPU 팩 안에서 실행되는 JSON-lines 추론 worker."""
+"""선택형 GPU 팩 안에서 실행되는 JSON-lines 추론 worker."""
 
 import argparse
 import json
@@ -24,9 +24,9 @@ def friendly_error(error: Exception) -> str:
     lowered = message.lower()
     if "out of memory" in lowered:
         return "GPU 메모리가 부족합니다. 더 작은 배치로 다시 시도하세요."
-    if "cuda" in lowered or "driver" in lowered:
+    if "cuda" in lowered or "hip" in lowered or "driver" in lowered:
         return (
-            "NVIDIA GPU를 시작하지 못했습니다. 드라이버를 업데이트하고 "
+            "GPU를 시작하지 못했습니다. 그래픽 드라이버를 업데이트하고 "
             f"다시 시도하세요. 세부 정보: {message[:160]}"
         )
     return message[:240] or "GPU worker에서 알 수 없는 오류가 발생했습니다."
@@ -48,7 +48,8 @@ def main(arguments: list[str] | None = None) -> int:
 
         if not torch.cuda.is_available():
             raise RuntimeError(
-                "CUDA 장치를 사용할 수 없습니다. NVIDIA 드라이버를 확인하세요."
+                "GPU compute 장치를 사용할 수 없습니다. 그래픽 드라이버와 "
+                "가속 팩 호환성을 확인하세요."
             )
         apply_torch_policy(
             torch,
@@ -61,7 +62,7 @@ def main(arguments: list[str] | None = None) -> int:
         )
         engine = ToonOutEngine(args.model_directory)
         engine.load(lambda message: emit("model_status", message=message))
-        if engine.device_label != "NVIDIA GPU":
+        if engine.device_label == "CPU":
             raise RuntimeError("GPU worker가 CPU 장치를 선택했습니다.")
         emit("model_ready", device_label=engine.device_label)
     except Exception as error:

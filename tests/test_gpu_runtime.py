@@ -9,6 +9,7 @@ from pathlib import Path
 from gpu_runtime import (
     GPU_WORKER_PROTOCOL,
     GPU_RUNTIME_KIND,
+    GENERIC_GPU_RUNTIME_KIND,
     GPU_RUNTIME_SCHEMA,
     GpuRuntimeCancelled,
     GpuRuntimeError,
@@ -52,6 +53,43 @@ def write_fake_pack(
 
 
 class GpuRuntimeTests(unittest.TestCase):
+    def test_finds_adjacent_amd_rocm_pack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pack = root / "ToonOut-AMD-ROCm-GPU-Pack.parts.json"
+            pack.write_text("{}", encoding="utf-8")
+
+            self.assertEqual(find_adjacent_gpu_pack(root), pack.resolve())
+
+    def test_loads_generic_amd_rocm_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = root / "ToonOutGpuWorker.exe"
+            worker.write_bytes(b"worker")
+            (root / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": GPU_RUNTIME_SCHEMA,
+                        "kind": GENERIC_GPU_RUNTIME_KIND,
+                        "runtime_version": "amd-test",
+                        "worker_protocol": GPU_WORKER_PROTOCOL,
+                        "torch_version": "2.10.0+rocm7.14.0",
+                        "vendor": "amd",
+                        "backend": "rocm",
+                        "compute_runtime": "7.14.0",
+                        "worker": worker.name,
+                        "files": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = load_gpu_runtime_manifest(root)
+
+            self.assertEqual(manifest.vendor, "amd")
+            self.assertEqual(manifest.backend, "rocm")
+            self.assertEqual(manifest.runtime_label, "ROCm 7.14.0")
+
     def test_abandoned_runtime_artifacts_are_removed_without_touching_active_one(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

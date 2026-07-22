@@ -4,6 +4,9 @@ ToonOut/BiRefNet을 이용해 여러 애니메이션 이미지의 배경을 로�
 
 현재 앱 버전은 `0.1.13`입니다.
 
+실험적 AMD ROCm worker 팩의 빌드와 테스트 방법은
+[`docs/amd-rocm-gpu-pack.md`](docs/amd-rocm-gpu-pack.md)에 정리되어 있습니다.
+
 실사용자 설치 전 확인할 운영체제, RAM/GPU 및 정확한 디스크 여유 공간은
 [배포 요구 사양](docs/system-requirements.md)에 정리되어 있습니다.
 

@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from gpu_runtime import (
-    GPU_RUNTIME_KIND,
+    GENERIC_GPU_RUNTIME_KIND,
     GPU_RUNTIME_SCHEMA,
     GPU_WORKER_PROTOCOL,
 )
@@ -32,6 +32,9 @@ def main() -> int:
     parser.add_argument("--source", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--runtime-version", default="2")
+    parser.add_argument("--vendor", choices=("nvidia", "amd"), default="nvidia")
+    parser.add_argument("--backend", choices=("cuda", "rocm"), default="cuda")
+    parser.add_argument("--gfx-target", action="append", default=[])
     args = parser.parse_args()
 
     source = Path(args.source).resolve()
@@ -39,10 +42,15 @@ def main() -> int:
     worker = source / "ToonOutGpuWorker.exe"
     if not worker.is_file():
         raise SystemExit(f"GPU worker가 없습니다: {worker}")
-    if torch.version.cuda != "12.8":
+    if args.backend == "cuda" and torch.version.cuda != "12.8":
         raise SystemExit(
             f"CUDA 12.8 환경에서 빌드해야 합니다. 현재 값: {torch.version.cuda}"
         )
+    hip_version = getattr(torch.version, "hip", None)
+    if args.backend == "rocm" and not hip_version:
+        raise SystemExit("ROCm PyTorch 환경에서 AMD GPU 팩을 빌드해야 합니다.")
+    if (args.vendor, args.backend) not in {("nvidia", "cuda"), ("amd", "rocm")}:
+        raise SystemExit("지원하지 않는 GPU vendor/backend 조합입니다.")
 
     records = []
     files = sorted(path for path in source.rglob("*") if path.is_file())
@@ -58,11 +66,15 @@ def main() -> int:
 
     manifest = {
         "schema_version": GPU_RUNTIME_SCHEMA,
-        "kind": GPU_RUNTIME_KIND,
+        "kind": GENERIC_GPU_RUNTIME_KIND,
         "runtime_version": args.runtime_version,
         "worker_protocol": GPU_WORKER_PROTOCOL,
         "torch_version": torch.__version__,
-        "cuda_runtime": torch.version.cuda,
+        "vendor": args.vendor,
+        "backend": args.backend,
+        "compute_runtime": hip_version if args.backend == "rocm" else torch.version.cuda,
+        "cuda_runtime": torch.version.cuda or "",
+        "gfx_targets": sorted(set(args.gfx_target)),
         "worker": "ToonOutGpuWorker.exe",
         "files": records,
     }

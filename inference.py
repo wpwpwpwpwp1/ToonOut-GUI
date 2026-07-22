@@ -306,6 +306,7 @@ class ToonOutEngine:
         self._transform = None
         self._torch = None
         self._device = "cpu"
+        self._gpu_backend = None
         self._input_dtype = None
         self._model_directory = (
             Path(model_directory)
@@ -319,7 +320,9 @@ class ToonOutEngine:
 
     @property
     def device_label(self) -> str:
-        return "NVIDIA GPU" if self._device == "cuda" else "CPU"
+        if self._device != "cuda":
+            return "CPU"
+        return "AMD GPU" if self._gpu_backend == "rocm" else "NVIDIA GPU"
 
     @property
     def model_directory(self) -> Path:
@@ -462,6 +465,11 @@ class ToonOutEngine:
 
         progress("처리 장치 준비 중", 96)
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._gpu_backend = (
+            "rocm"
+            if self._device == "cuda" and getattr(torch.version, "hip", None)
+            else "cuda" if self._device == "cuda" else None
+        )
         self._model, self._input_dtype = prepare_model_for_device(
             model,
             self._device,
