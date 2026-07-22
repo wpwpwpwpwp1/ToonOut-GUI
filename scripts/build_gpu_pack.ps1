@@ -67,4 +67,4 @@ if (-not $KeepBuildTree -and (Test-Path -LiteralPath $BuildRoot)) {
     Remove-Item -LiteralPath $ResolvedBuild -Recurse -Force
 }
 
-Write-Output "GPU pack Release parts created under dist. Commit the updated gpu_download.py before tagging the app release."
+Write-Output "GPU pack parts created under dist. Upload them to the pinned GPU Release, then commit its tag and the updated gpu_download.py before an app release."

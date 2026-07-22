@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from gpu_download import (
     GPU_DOWNLOAD_PROGRESS_END,
+    GPU_PACK_RELEASE_TAG,
     GpuPackRelease,
     current_gpu_pack_release,
     download_and_install_gpu_runtime,
@@ -57,7 +58,7 @@ def split_release(part_contents: list[bytes]):
         }
     ).encode("utf-8")
     release = GpuPackRelease(
-        app_version="0.2.0",
+        release_tag="v0.2.0",
         manifest_url=(
             "https://github.com/example/ToonOut/releases/download/v0.2.0/"
             "ToonOut-NVIDIA-GPU-Pack.parts.json"
@@ -72,20 +73,19 @@ def split_release(part_contents: list[bytes]):
 
 
 class GpuPackDownloadTests(unittest.TestCase):
-    def test_current_release_uses_exact_app_version(self):
+    def test_current_release_uses_pinned_gpu_pack_tag(self):
         release = current_gpu_pack_release(
-            "1.2.3",
             system="windows",
             machine="AMD64",
         )
 
-        self.assertIn("/v1.2.3/", release.manifest_url)
+        self.assertEqual(release.release_tag, GPU_PACK_RELEASE_TAG)
+        self.assertIn(f"/{GPU_PACK_RELEASE_TAG}/", release.manifest_url)
         self.assertEqual(release.worker_protocol, 2)
 
     def test_unsupported_architecture_is_rejected_before_network(self):
         with self.assertRaisesRegex(GpuRuntimeError, "아키텍처"):
             current_gpu_pack_release(
-                "1.2.3",
                 system="windows",
                 machine="ARM64",
             )
