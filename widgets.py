@@ -958,14 +958,18 @@ class AccelerationDialog(QDialog):
         self._add_detail_row(
             details_layout,
             "현재 처리",
-            "NVIDIA GPU" if info.mode == AccelerationMode.GPU_ACTIVE else "CPU",
+            (
+                f"{info.device.vendor_label} GPU"
+                if info.mode == AccelerationMode.GPU_ACTIVE and info.device
+                else "CPU"
+            ),
         )
         if info.device is not None:
             self._add_detail_row(details_layout, "그래픽 카드", info.device.name)
             if info.device.driver_version:
                 self._add_detail_row(
                     details_layout,
-                    "NVIDIA 드라이버",
+                    f"{info.device.vendor_label} 드라이버",
                     info.device.driver_version,
                 )
             if info.device.memory_gib is not None:
@@ -978,7 +982,7 @@ class AccelerationDialog(QDialog):
             self._add_detail_row(
                 details_layout,
                 "GPU 가속 팩",
-                f"PyTorch {info.runtime.torch_version} · CUDA {info.runtime.cuda_runtime}",
+                f"PyTorch {info.runtime.torch_version} · {info.runtime.runtime_label}",
             )
             self._add_detail_row(
                 details_layout,
@@ -1056,7 +1060,15 @@ class AccelerationDialog(QDialog):
             remove_button.clicked.connect(self.remove_requested.emit)
             action_row.addWidget(remove_button)
         if info.device is not None or info.runtime is not None:
-            driver_button = QPushButton("NVIDIA 드라이버 확인")
+            vendor_label = (
+                info.device.vendor_label
+                if info.device is not None
+                else (
+                    "AMD" if getattr(info.runtime, "vendor", "nvidia") == "amd"
+                    else "NVIDIA"
+                )
+            )
+            driver_button = QPushButton(f"{vendor_label} 드라이버 확인")
             driver_button.setObjectName("quietButton")
             driver_button.clicked.connect(self.driver_page_requested.emit)
             action_row.addWidget(driver_button)
@@ -1088,6 +1100,13 @@ class AccelerationDialog(QDialog):
         if info.runtime is not None and not gpu_runtime_is_compatible(
             info.runtime
         ):
+            if info.runtime.vendor == "amd":
+                return (
+                    "GPU 가속 팩 업데이트가 필요합니다",
+                    "설치된 AMD 팩은 현재 ToonOut의 worker protocol과 맞지 않습니다.",
+                    "업데이트 버튼을 누르고 새 AMD ROCm 팩 파일을 선택하세요. "
+                    "업데이트 전에도 CPU 처리는 계속 사용할 수 있습니다.",
+                )
             return (
                 "GPU 가속 팩 업데이트가 필요합니다",
                 "설치된 팩은 현재 ToonOut의 성능 모드와 일시정지를 지원하지 않습니다.",
@@ -1098,38 +1117,46 @@ class AccelerationDialog(QDialog):
             return (
                 "GPU 가속을 사용합니다",
                 f"다음 배경 제거 작업은 {info.device.name}에서 실행됩니다.",
-                "GPU 가속 팩은 위에 표시된 선택 폴더에 설치됩니다. 시스템 CUDA "
-                "Toolkit이나 Python을 설치하지 않으며 언제든 CPU로 전환하거나 "
+                "GPU 가속 팩은 위에 표시된 선택 폴더에 설치됩니다. 시스템 GPU SDK나 "
+                "Python을 설치하지 않으며 언제든 CPU로 전환하거나 "
                 "가속 팩만 삭제할 수 있습니다.",
             )
         if info.mode == AccelerationMode.GPU_PACK_INSTALLED:
             return (
                 "GPU 가속 팩이 설치되어 있습니다",
                 "현재는 CPU로 처리하도록 선택되어 있습니다.",
-                "호환되는 NVIDIA 그래픽 카드가 있으면 GPU 가속을 켤 수 있습니다. "
+                "설치한 팩과 같은 제조사의 호환 GPU가 있으면 가속을 켤 수 있습니다. "
                 "이미지와 모델은 GPU를 사용해도 컴퓨터 밖으로 전송되지 않습니다.",
             )
         if info.mode == AccelerationMode.GPU_PACK_AVAILABLE:
+            if info.device.vendor == "amd":
+                return (
+                    "이 PC에서 AMD GPU 가속을 추가할 수 있습니다",
+                    f"{info.device.name}을 찾았습니다.",
+                    "설치 버튼을 누르고 미리 빌드한 실험적 AMD ROCm GPU 팩을 "
+                    "선택하세요. 팩은 설치 전에 파일 크기와 SHA-256을 검증합니다. "
+                    "시스템 ROCm SDK나 Python을 따로 설치하지 마세요.",
+                )
             return (
                 "이 PC에서 GPU 가속을 추가할 수 있습니다",
                 f"{info.device.name}을 찾았습니다. 같은 ToonOut 앱에 GPU 지원을 추가할 수 있습니다.",
                 "설치 버튼을 누르면 현재 ToonOut에 맞는 공식 GPU 팩을 자동으로 "
-                "다운로드하고 검증합니다. 선택한 드라이브에 설치 중 약 8.4GB의 "
-                "여유 공간이 필요합니다. "
-                "시스템 CUDA Toolkit이나 Python은 따로 설치하지 마세요.",
+                "다운로드하고 검증합니다. 필요한 여유 공간은 설치 화면에서 확인할 수 "
+                "있습니다. 시스템 CUDA Toolkit, ROCm SDK 또는 Python을 따로 설치하지 "
+                "마세요.",
             )
         if info.mode == AccelerationMode.GPU_UNAVAILABLE:
             return (
                 "GPU 가속을 시작할 수 없습니다",
-                "GPU 가속 팩은 설치되어 있지만 호환되는 NVIDIA 장치를 찾지 못했습니다.",
-                "CPU로 전환한 뒤 NVIDIA 드라이버와 그래픽 카드 호환성을 확인하세요. "
-                "문제 해결을 위해 시스템 CUDA Toolkit을 설치할 필요는 없습니다.",
+                "GPU 가속 팩은 설치되어 있지만 호환되는 GPU를 찾지 못했습니다.",
+                "CPU로 전환한 뒤 그래픽 드라이버와 가속 팩 호환성을 확인하세요. "
+                "별도의 CUDA Toolkit이나 ROCm SDK를 설치할 필요는 없습니다.",
             )
         return (
             "현재 CPU로 처리합니다",
-            "호환되는 NVIDIA 그래픽 카드를 찾지 못했습니다.",
-            "CPU 처리는 추가 설치 없이 사용할 수 있습니다. 현재 GPU 가속은 NVIDIA "
-            "그래픽 카드만 지원하며 AMD·Intel GPU는 지원하지 않습니다.",
+            "호환되는 NVIDIA 또는 AMD 그래픽 카드를 찾지 못했습니다.",
+            "CPU 처리는 추가 설치 없이 사용할 수 있습니다. GPU 가속은 지원되는 "
+            "NVIDIA CUDA 및 AMD ROCm 그래픽 카드에서 사용할 수 있습니다.",
         )
 
     @staticmethod

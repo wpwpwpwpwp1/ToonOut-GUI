@@ -1,4 +1,4 @@
-"""선택형 NVIDIA GPU worker 팩을 검증하고 사용자 폴더에 관리한다."""
+"""선택형 GPU worker 팩을 검증하고 사용자 폴더에 관리한다."""
 
 import bisect
 import hashlib
@@ -21,12 +21,21 @@ from process_safety import process_is_running
 
 
 GPU_RUNTIME_KIND = "toonout-nvidia-gpu-runtime"
+GENERIC_GPU_RUNTIME_KIND = "toonout-gpu-runtime"
 GPU_RUNTIME_SCHEMA = 1
 GPU_WORKER_PROTOCOL = 2
 GPU_RUNTIME_SETTING = "acceleration/use_gpu_runtime"
 GPU_RUNTIME_DIRECTORY_SETTING = "acceleration/runtime_directory"
 GPU_PACK_PATTERN = "ToonOut-NVIDIA-GPU-Pack*.zip"
 GPU_PACK_PARTS_PATTERN = "ToonOut-NVIDIA-GPU-Pack*.parts.json"
+GENERIC_GPU_PACK_PATTERNS = (
+    "ToonOut-AMD-ROCm-GPU-Pack*.zip",
+    GPU_PACK_PATTERN,
+)
+GENERIC_GPU_PACK_PARTS_PATTERNS = (
+    "ToonOut-AMD-ROCm-GPU-Pack*.parts.json",
+    GPU_PACK_PARTS_PATTERN,
+)
 GPU_PACK_PARTS_KIND = "toonout-nvidia-gpu-pack-parts"
 GPU_PACK_PARTS_SCHEMA = 1
 MAX_PACK_FILES = 100_000
@@ -53,6 +62,15 @@ class GpuRuntimeManifest:
     worker_path: Path
     files: tuple[dict, ...]
     worker_protocol: int = 1
+    vendor: str = "nvidia"
+    backend: str = "cuda"
+    compute_runtime: str | None = None
+
+    @property
+    def runtime_label(self) -> str:
+        runtime = self.compute_runtime or self.cuda_runtime
+        backend = "ROCm" if self.backend == "rocm" else "CUDA"
+        return f"{backend} {runtime}" if runtime else backend
 
 
 @dataclass(frozen=True)
@@ -260,19 +278,32 @@ def load_gpu_runtime_manifest(
 
     if data.get("schema_version") != GPU_RUNTIME_SCHEMA:
         raise GpuRuntimeError("지원하지 않는 GPU 가속 팩 형식입니다.")
-    if data.get("kind") != GPU_RUNTIME_KIND:
-        raise GpuRuntimeError("ToonOut용 NVIDIA GPU 가속 팩이 아닙니다.")
+    if data.get("kind") not in {GPU_RUNTIME_KIND, GENERIC_GPU_RUNTIME_KIND}:
+        raise GpuRuntimeError("ToonOut용 GPU 가속 팩이 아닙니다.")
 
     try:
         worker_relative = _safe_relative_path(str(data["worker"]))
         file_records = tuple(data["files"])
+        vendor = str(data.get("vendor") or "nvidia").lower()
+        backend = str(data.get("backend") or "cuda").lower()
+        if (vendor, backend) not in {
+            ("nvidia", "cuda"),
+            ("amd", "rocm"),
+        }:
+            raise ValueError("unsupported GPU vendor/backend")
+        compute_runtime = str(
+            data.get("compute_runtime") or data.get("cuda_runtime") or ""
+        )
         manifest = GpuRuntimeManifest(
             runtime_version=str(data["runtime_version"]),
             torch_version=str(data["torch_version"]),
-            cuda_runtime=str(data["cuda_runtime"]),
+            cuda_runtime=str(data.get("cuda_runtime") or ""),
             worker_path=runtime_directory / worker_relative,
             files=file_records,
             worker_protocol=int(data.get("worker_protocol", 1)),
+            vendor=vendor,
+            backend=backend,
+            compute_runtime=compute_runtime or None,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise GpuRuntimeError("GPU 가속 팩 정보가 올바르지 않습니다.") from error
@@ -412,12 +443,14 @@ def find_adjacent_gpu_pack(application_path: str | Path | None = None) -> Path |
     if not getattr(sys, "frozen", False):
         search_directories.append(application_directory / "dist")
     for directory in search_directories:
-        match = next(iter(sorted(directory.glob(GPU_PACK_PARTS_PATTERN))), None)
-        if match is not None:
-            return match
-        match = next(iter(sorted(directory.glob(GPU_PACK_PATTERN))), None)
-        if match is not None:
-            return match
+        for pattern in GENERIC_GPU_PACK_PARTS_PATTERNS:
+            match = next(iter(sorted(directory.glob(pattern))), None)
+            if match is not None:
+                return match
+        for pattern in GENERIC_GPU_PACK_PATTERNS:
+            match = next(iter(sorted(directory.glob(pattern))), None)
+            if match is not None:
+                return match
     return None
 
 
