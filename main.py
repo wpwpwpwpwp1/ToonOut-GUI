@@ -888,7 +888,7 @@ class MainWindow(QMainWindow):
 
     def _install_gpu_runtime(self):
         try:
-            release = current_gpu_pack_release(APP_VERSION)
+            release = current_gpu_pack_release()
         except Exception as error:
             QMessageBox.warning(
                 self,

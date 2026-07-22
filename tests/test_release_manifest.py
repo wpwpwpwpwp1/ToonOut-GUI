@@ -41,6 +41,12 @@ class ReleaseManifestTests(unittest.TestCase):
             '$env:PYTHONUSERBASE = Join-Path $BuildRoot', gpu_build_script
         )
 
+        workflow = (
+            PROJECT_ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Verify pinned GPU pack release", workflow)
+        self.assertIn("verify_gpu_pack_release.py", workflow)
+
     def test_release_script_creates_runtime_verifiable_manifest(self):
         private_key = Ed25519PrivateKey.generate()
         private_value = base64.b64encode(

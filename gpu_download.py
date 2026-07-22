@@ -28,6 +28,10 @@ from gpu_runtime import (
 
 
 GPU_PACK_MANIFEST_NAME = "ToonOut-NVIDIA-GPU-Pack.parts.json"
+# GPU 런타임은 앱보다 훨씬 크고 worker protocol이 바뀔 때만 새로 배포한다.
+# 앱 패치 버전과 분리된 이 태그를 유지하면 모든 앱 릴리스에 같은 3GB 팩을
+# 복제할 필요가 없다.
+GPU_PACK_RELEASE_TAG = "v0.1.11"
 # 이 값들은 배포할 분할 manifest 자체를 신뢰하기 위한 앱 내 고정값이다.
 # GPU 팩을 다시 빌드하면 scripts/update_gpu_pack_config.py로 갱신한다.
 GPU_PACK_MANIFEST_SIZE = 622
@@ -41,7 +45,7 @@ DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
 @dataclass(frozen=True)
 class GpuPackRelease:
-    app_version: str
+    release_tag: str
     manifest_url: str
     manifest_name: str
     manifest_size: int
@@ -51,7 +55,6 @@ class GpuPackRelease:
 
 
 def current_gpu_pack_release(
-    app_version: str,
     *,
     system: str | None = None,
     machine: str | None = None,
@@ -69,10 +72,10 @@ def current_gpu_pack_release(
 
     manifest_url = (
         "https://github.com/wpwpwpwpwp1/ToonOut-GUI/releases/download/"
-        f"v{app_version}/{quote(GPU_PACK_MANIFEST_NAME)}"
+        f"{quote(GPU_PACK_RELEASE_TAG)}/{quote(GPU_PACK_MANIFEST_NAME)}"
     )
     return GpuPackRelease(
-        app_version=app_version,
+        release_tag=GPU_PACK_RELEASE_TAG,
         manifest_url=manifest_url,
         manifest_name=GPU_PACK_MANIFEST_NAME,
         manifest_size=GPU_PACK_MANIFEST_SIZE,
@@ -136,8 +139,8 @@ def _download_verified_file(
     except HTTPError as error:
         if error.code == 404:
             raise GpuRuntimeError(
-                "현재 ToonOut 버전용 GPU 가속 팩을 배포 서버에서 찾지 "
-                "못했습니다. 앱과 GPU 팩 배포가 모두 완료되었는지 확인하세요."
+                "현재 ToonOut과 호환되는 GPU 가속 팩을 배포 서버에서 찾지 "
+                "못했습니다. 잠시 후 다시 시도하거나 최신 앱을 확인하세요."
             ) from error
         if error.code in {403, 429}:
             raise GpuRuntimeError(

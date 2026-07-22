@@ -47,6 +47,28 @@ jobs:
           }
           python -c "from update_config import UPDATE_PUBLIC_KEY_B64; assert UPDATE_PUBLIC_KEY_B64, 'update_config.py has no public key'"
 
+      - name: Verify pinned GPU pack release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $gpuTag = python -c "from gpu_download import GPU_PACK_RELEASE_TAG; print(GPU_PACK_RELEASE_TAG)"
+          $manifestName = python -c "from gpu_download import GPU_PACK_MANIFEST_NAME; print(GPU_PACK_MANIFEST_NAME)"
+          $checkRoot = Join-Path $env:RUNNER_TEMP "toonout-gpu-pack-release"
+          New-Item -ItemType Directory -Path $checkRoot -Force | Out-Null
+          gh release download "$gpuTag" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --pattern "$manifestName" `
+            --dir "$checkRoot"
+          gh release view "$gpuTag" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --json assets | Out-File `
+              -FilePath (Join-Path $checkRoot "assets.json") `
+              -Encoding utf8
+          python .\scripts\verify_gpu_pack_release.py `
+            --manifest (Join-Path $checkRoot $manifestName) `
+            --assets-json (Join-Path $checkRoot "assets.json")
+
       - name: Detect Windows publisher signing configuration
         shell: pwsh
         env:

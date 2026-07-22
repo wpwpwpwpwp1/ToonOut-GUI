@@ -73,26 +73,30 @@ git push origin v0.1.0
 4. Ed25519 서명 `update.json` 생성
 5. 설치 파일과 manifest가 든 GitHub Release 초안 생성
 
-GPU 팩까지 올리기 전에는 Release 초안을 공개하지 않는다. 그래야 자동 업데이트로
-앱만 먼저 받은 NVIDIA 사용자가 아직 없는 GPU 팩을 설치하려다 실패하지 않는다.
+워크플로는 앱 빌드 전에 `gpu_download.py`의 `GPU_PACK_RELEASE_TAG`가 가리키는
+Release를 검사한다. 고정된 manifest 또는 분할 조각이 없거나 크기·GitHub SHA-256이
+앱의 검증값과 다르면 릴리스를 중단한다.
 
-NVIDIA GPU 팩은 약 3.27GB여서 GitHub Release의 단일 파일 제한을 넘는다. 태그를
-만들기 전에 CUDA 12.8 빌드 환경에서 `scripts\build_gpu_pack.ps1`을 실행하면
+NVIDIA GPU 팩은 약 3.27GB여서 GitHub Release의 단일 파일 제한을 넘는다. GPU worker
+protocol이나 런타임 내용이 바뀔 때 CUDA 12.8 빌드 환경에서
+`scripts\build_gpu_pack.ps1`을 실행하면
 `.parts.json`과
 `.partNN` 조각이 만들어진다. `.parts.json`과 모든 조각을 Release에 추가하고,
 셋 중 하나라도 빠지지 않았는지 확인한다. 빌드 중에는 GPU worker, 원본 ZIP, 분할본이
 잠시 함께 존재하지만, 성공 후에는 원본 ZIP과 worker 중간 빌드 폴더를 자동 삭제한다.
 이 스크립트는 앱이 신뢰할 manifest 크기·SHA-256·전체 팩 크기도 `gpu_download.py`에
-반영한다. 변경된 파일을 앱 버전 변경과 함께 커밋한 뒤 태그해야 한다.
+반영한다. GPU 팩 파일을 고정할 호스트 Release에 먼저 올리고, 해당 태그를
+`GPU_PACK_RELEASE_TAG`에 기록한 뒤 변경된 검증값과 함께 커밋한다.
 기본 GitHub-hosted Windows runner 대신 22GB 이상 여유가 있는 검증된 Windows 빌드
 머신에서 만든다. 디버깅을 위해 중간 결과가 필요할 때만 `-KeepSourceArchive` 또는
 `-KeepBuildTree`를 사용한다. GPU worker EXE도 팩을 만들기 전에
 `scripts\sign_windows_binary.ps1`로 서명한다.
 
-CPU Release 초안이 만들어진 뒤 같은 태그에 GPU 파일을 추가한다.
+GPU 팩을 새로 만들었을 때만 고정할 호스트 Release에 파일을 추가한다. 앱 패치
+릴리스마다 3.27GB 파일을 복제하지 않는다.
 
 ```powershell
-gh release upload v0.1.0 `
+gh release upload <GPU_PACK_RELEASE_TAG> `
   dist\ToonOut-NVIDIA-GPU-Pack.parts.json `
   dist\ToonOut-NVIDIA-GPU-Pack.part01 `
   dist\ToonOut-NVIDIA-GPU-Pack.part02
@@ -100,8 +104,8 @@ gh release upload v0.1.0 `
 
 조각 수는 팩 크기에 따라 늘 수 있으므로 실제 `.parts.json`의 `parts` 목록과
 Release 자산이 정확히 일치하는지 확인한다. 원본 3GB ZIP은 Release에 올리지 않는다.
-초안의 설치 파일로 깨끗한 PC에서 모델 설치, GPU 자동 다운로드·설치, 실제 GPU 추론을
-확인한 뒤 `gh release edit v0.1.0 --draft=false`로 공개한다.
+앱 Release 초안의 설치 파일로 깨끗한 PC에서 모델 설치, GPU 자동 다운로드·설치,
+실제 GPU 추론을 확인한 뒤 앱 Release를 공개한다.
 
 ### 앱 아이콘을 바꿀 때
 
